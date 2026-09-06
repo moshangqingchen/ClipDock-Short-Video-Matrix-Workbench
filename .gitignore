@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+.npm-cache/
+
+# build output
+dist/
+dist-electron/
+release/
+
+# runtime data
+workbench-data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# tooling
+.vite/
+coverage/
+*.tsbuildinfo
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# local scratch
+tmp-*
+__pycache__/
+
+shot-*.png
+eslint-report.json
+

@@ -1,0 +1,72 @@
+.platformGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.platformCard {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+  padding: 14px 14px 12px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  text-align: left;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+.platformCard:hover {
+  border-color: var(--line-strong);
+  transform: translateY(-1px);
+}
+.platformCard.selected {
+  border-color: var(--brand-500);
+  background: var(--bg-active);
+  box-shadow: 0 0 0 3px rgba(38, 115, 255, 0.12);
+}
+.platformGlyph {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-weight: 800;
+  font-size: 13px;
+}
+.platformName {
+  font-weight: 650;
+  font-size: var(--text-sm);
+}
+.platformMethods {
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+.platformCheck {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  color: var(--brand-600);
+}
+.assurance {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+.assurance div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.assurance svg {
+  color: var(--brand-600);
+  flex: 0 0 auto;
+}

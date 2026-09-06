@@ -1,0 +1,91 @@
+{
+  "name": "short-video-matrix-workbench",
+  "version": "1.0.0",
+  "description": "短视频矩阵工作台 — 多平台多账号独立浏览器环境与数据观测",
+  "author": "Short Video Matrix Workbench Team",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n vite,electron -c cyan,magenta \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && node scripts/build-electron.mjs && node scripts/electron-dev-launch.mjs\"",
+    "dev:renderer": "vite --host 127.0.0.1",
+    "build": "npm run typecheck && vite build && node scripts/build-electron.mjs --production",
+    "build:electron": "node scripts/build-electron.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "lint": "eslint src",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke:electron": "vite build && node scripts/build-electron.mjs && node scripts/electron-window-smoke.mjs",
+    "start": "electron .",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder --win portable nsis",
+    "dist:portable": "npm run build && electron-builder --win portable",
+    "dist:installer": "npm run build && electron-builder --win nsis",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "lucide-react": "1.30.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-is": "^19.2.0",
+    "recharts": "3.10.1",
+    "zod": "4.4.3",
+    "zustand": "5.0.15"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.3",
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.1",
+    "concurrently": "10.0.4",
+    "electron": "43.3.0",
+    "electron-builder": "26.0.12",
+    "esbuild": "0.28.2",
+    "eslint": "10.9.1",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "jsdom": "30.0.1",
+    "prettier": "3.9.6",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "8.69.0",
+    "vite": "8.2.1",
+    "vitest": "4.1.10",
+    "wait-on": "9.0.3"
+  },
+  "build": {
+    "appId": "com.shortvideo.matrix.workbench",
+    "productName": "短视频矩阵工作台",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ],
+      "signAndEditExecutable": false,
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "perMachine": false,
+      "artifactName": "${productName}-${version}-setup.${ext}"
+    }
+  }
+}

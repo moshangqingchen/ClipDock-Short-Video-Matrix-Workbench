@@ -1,0 +1,122 @@
+/* Design tokens. Every component reads from these; nothing hard-codes colors. */
+
+:root {
+  /* typography */
+  --font-sans:
+    "Inter", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  --text-xs: 11px;
+  --text-sm: 12.5px;
+  --text-md: 13.5px;
+  --text-lg: 15px;
+  --text-xl: 18px;
+  --text-2xl: 22px;
+  --text-3xl: 28px;
+
+  /* spacing (8px grid) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+
+  /* radii */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-full: 999px;
+
+  /* motion */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur: 200ms;
+  --dur-slow: 320ms;
+
+  /* layout */
+  --rail-w: 220px;
+  --rail-w-collapsed: 64px;
+  --sidebar-w: 288px;
+  --topbar-h: 56px;
+  --drawer-w: 380px;
+
+  /* brand */
+  --brand-50: #eef6ff;
+  --brand-100: #d9eaff;
+  --brand-200: #b8d8ff;
+  --brand-300: #86bdff;
+  --brand-400: #4d99ff;
+  --brand-500: #2673ff;
+  --brand-600: #0f56f5;
+  --brand-700: #0b43cf;
+  --brand-800: #0f3aa7;
+  --brand-900: #123483;
+
+  --success: #17a34a;
+  --success-soft: rgba(23, 163, 74, 0.14);
+  --warning: #f59e0b;
+  --warning-soft: rgba(245, 158, 11, 0.16);
+  --danger: #ef4444;
+  --danger-soft: rgba(239, 68, 68, 0.14);
+  --info: #0ea5e9;
+  --info-soft: rgba(14, 165, 233, 0.14);
+
+  color-scheme: light;
+}
+
+:root,
+:root[data-theme="light"] {
+  --bg: #f4f6fa;
+  --bg-elev: #ffffff;
+  --bg-sunken: #eceff5;
+  --bg-hover: rgba(15, 23, 42, 0.045);
+  --bg-active: rgba(38, 115, 255, 0.1);
+  --fg: #0f172a;
+  --fg-muted: #5b6577;
+  --fg-subtle: #8b95a7;
+  --fg-inverse: #ffffff;
+  --line: rgba(15, 23, 42, 0.08);
+  --line-strong: rgba(15, 23, 42, 0.14);
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 1px rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 6px 18px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.05);
+  --shadow-lg: 0 20px 50px rgba(15, 23, 42, 0.16), 0 6px 16px rgba(15, 23, 42, 0.08);
+  --rail-bg: #0f1420;
+  --rail-fg: #aab4c5;
+  --rail-fg-active: #ffffff;
+  --rail-hover: rgba(255, 255, 255, 0.06);
+  --rail-active: rgba(38, 115, 255, 0.22);
+  --rail-line: rgba(255, 255, 255, 0.08);
+  --chart-grid: rgba(15, 23, 42, 0.06);
+  --scrollbar: rgba(15, 23, 42, 0.18);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b0f17;
+  --bg-elev: #121826;
+  --bg-sunken: #0e131e;
+  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-active: rgba(77, 153, 255, 0.16);
+  --fg: #e6ebf4;
+  --fg-muted: #9aa6ba;
+  --fg-subtle: #6b7688;
+  --fg-inverse: #0b0f17;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 22px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.6);
+  --rail-bg: #070a11;
+  --rail-fg: #9aa6ba;
+  --rail-fg-active: #ffffff;
+  --rail-hover: rgba(255, 255, 255, 0.06);
+  --rail-active: rgba(77, 153, 255, 0.22);
+  --rail-line: rgba(255, 255, 255, 0.07);
+  --chart-grid: rgba(255, 255, 255, 0.07);
+  --scrollbar: rgba(255, 255, 255, 0.2);
+  --brand-500: #4d99ff;
+  --brand-600: #2673ff;
+}
