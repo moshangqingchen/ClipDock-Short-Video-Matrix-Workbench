@@ -3,14 +3,14 @@ import http from "node:http";
 import https from "node:https";
 import { isIP, type Socket } from "node:net";
 import tls from "node:tls";
-import type { GlobalPlatformId } from "@shared/platforms";
+import type { CnPlatformId, GlobalPlatformId } from "@shared/platforms";
 import { OFFICIAL_API_HOSTS, assertTikTokUploadTarget, type TikTokUploadTarget } from "./proxy-target-policy";
 import { assertYouTubeUploadTarget, type YouTubeUploadTarget } from "./youtube-upload-target";
 export { OFFICIAL_API_HOSTS } from "./proxy-target-policy";
 
 export interface ProxyTunnelContext {
   readonly id: string;
-  readonly platformId: GlobalPlatformId | import("@shared/platforms").CnPlatformId;
+  readonly platformId: GlobalPlatformId | CnPlatformId;
   readonly target: Readonly<{ host: string; port: 443 }>;
   readonly proxy: Readonly<{ host: string; port: number }>;
   readonly socket: Readonly<{

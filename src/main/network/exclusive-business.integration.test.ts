@@ -152,6 +152,22 @@ async function fixture(rows: readonly { platform: CnPlatformId; status?: Account
     getState: (id: string) => ({ accountId: id, url: views.get(id)!.wc.getURL(), loading: false }),
     getSession: (id: string) => ({ session: views.get(id)!.session as unknown as Session }),
     getWebContents: (id: string) => views.get(id)!.wc,
+    // Native identity observations are part of the ViewPool contract used by
+    // Kuaishou/Channels collection, just like the native page/session above.
+    getIdentityEvidence: (id: string) => {
+      const account = store.accounts.get(id);
+      if (!account || !["online", "expiring"].includes(account.status) ||
+          views.get(id)!.wc.getURL() === "about:blank") return null;
+      return {
+        kind: "online" as const,
+        reason: "synthetic authenticated native response",
+        key: id,
+        subject: id,
+        sequence: 1,
+        observedAt: Date.now(),
+        profile: { externalId: id },
+      };
+    },
   } as unknown as ViewPool;
   const notify = vi.fn();
   const accounts = new AccountService({ store, viewPool: pool, notify });

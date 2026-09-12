@@ -47,7 +47,11 @@ export function parseDisplayIpipLocation(body: Buffer): DisplayIpipLocation | nu
   if (!body.length || body.length > 4096) return null;
   try {
     const text = new TextDecoder("utf-8", { fatal: true }).decode(body);
-    if (text.length > 1024 || /[<>\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/u.test(text))
+    const hasControlCharacters = [...text].some((char) => {
+      const code = char.charCodeAt(0);
+      return (code < 0x20 && char !== "\n" && char !== "\r") || (code >= 0x7f && code <= 0x9f);
+    });
+    if (text.length > 1024 || hasControlCharacters || /[<>\u202a-\u202e\u2066-\u2069]/u.test(text))
       return null;
     const match =
       /^当前 IP[：:][ ]*(\d{1,3}(?:\.\d{1,3}){3})[ ]+来自于[：:][ ]*中国(?:[ ]+([^\r\n]+))?$/.exec(

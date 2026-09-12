@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AccountEgressLocationService,
   type AccountEgressLocationContext,
-  type AccountEgressLocationOptions,
 } from "./account-egress-location";
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");

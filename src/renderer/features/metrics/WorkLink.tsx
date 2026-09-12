@@ -7,7 +7,8 @@ import styles from "./work-link.module.css";
 
 export function workLinkUrl(work: Work, account: Pick<Account, "id" | "platformId">): string | null {
   if (work.accountId !== account.id || work.platformId !== account.platformId ||
-    !work.url || work.url.length > 4000 || /[\u0000-\u001f\u007f\\]/.test(work.url)) return null;
+    !work.url || work.url.length > 4000 ||
+    [...work.url].some((char) => char.charCodeAt(0) < 0x20 || char === "\u007f" || char === "\\")) return null;
   try {
     const url = new URL(work.url);
     if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.port ||

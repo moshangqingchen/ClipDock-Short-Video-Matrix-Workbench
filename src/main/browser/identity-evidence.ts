@@ -68,7 +68,8 @@ function avatarSource(user: Record<string, unknown>, platform: PlatformId): stri
   const fields = platform === "weixin_channels" ? ["headImgUrl"] : ["headUrl", "headurl", "avatar", "userHead"];
   for (const field of fields) {
     const value = user[field];
-    if (typeof value !== "string" || value.length > 8192 || /[\u0000-\u0020\u007f\\]/.test(value)) continue;
+    if (typeof value !== "string" || value.length > 8192 ||
+        [...value].some((char) => char.charCodeAt(0) <= 0x20 || char === "\u007f" || char === "\\")) continue;
     try {
       const url = new URL(value);
       if (["http:", "https:"].includes(url.protocol) && !url.username && !url.password && !url.port)

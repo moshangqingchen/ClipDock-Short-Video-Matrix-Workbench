@@ -43,7 +43,7 @@ function reviewedOrigin(platformId: CnPlatformId, input: RemoteMediaOrigin): Rem
 export function normalizeDomesticMediaSource(platformId: CnPlatformId, input: string): string | null {
   try {
     if (!isCnPlatformId(platformId) || typeof input !== "string" || input.length > 8192 ||
-        /[\u0000-\u0020\u007f\\]/.test(input)) return null;
+        [...input].some((char) => char.charCodeAt(0) <= 0x20 || char === "\u007f" || char === "\\")) return null;
     const url = new URL(input);
     if (!["http:", "https:"].includes(url.protocol) || url.port || url.username || url.password) return null;
     url.protocol = "https:";
@@ -109,7 +109,8 @@ export function createDomesticMediaAuthorization(
       if (!current()) return { state: "waiting-network" };
       const fetch: Session["fetch"] = async (input, init) => {
         // This wrapper cannot be reused to navigate, call APIs or send account credentials.
-        if (typeof input !== "string" || input.length > 8192 || /[\u0000-\u0020\u007f\\]/.test(input))
+        if (typeof input !== "string" || input.length > 8192 ||
+            [...input].some((char) => char.charCodeAt(0) <= 0x20 || char === "\u007f" || char === "\\"))
           throw new RemoteMediaUnavailableError();
         let url: URL;
         try { url = new URL(input); } catch { throw new RemoteMediaUnavailableError(); }

@@ -1,7 +1,8 @@
 import {expect,it,vi} from "vitest";
 import type {CollectorContext} from "./shared";
+import type * as Shared from "./shared";
 const calls=vi.hoisted(()=>({json:vi.fn()}));
-vi.mock("./shared",async importOriginal=>({...await importOriginal<typeof import("./shared")>(),firstJson:calls.json}));
+vi.mock("./shared",async importOriginal=>({...await importOriginal<typeof Shared>(),firstJson:calls.json}));
 import {kuaishouCollector} from "./kuaishou";
 it("uses verified live identity without replaying empty authentication requests",async()=>{
   const identityProfile={externalId:"self",followers:0,following:2,likes:3};
