@@ -2,11 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseSync, backup } from 'node:sqlite';
+import { assertInstalledDataContext } from './installed-data-context.mjs';
 
 // This update replaces program files only. Snapshot SQLite consistently without
 // depending on disposable Chromium cache files being unlocked.
 const program='D:\\SJdownloads\\创作平台';
-const data='C:\\Users\\Administrator\\AppData\\Roaming\\short-video-matrix-workbench';
+const dataContext = assertInstalledDataContext('C:\\Users\\Administrator\\AppData\\Roaming\\short-video-matrix-workbench');
+const data = dataContext.Source.PhysicalPath;
 const previousFull='D:\\SJdownloads\\创作平台备份\\20260912-191125-d7cf22';
 if(!fs.existsSync(path.join(previousFull,'manifest.json')))throw Error('Verified full backup missing');
 const prior=JSON.parse(fs.readFileSync(path.join(previousFull,'manifest.json'),'utf8').replace(/^\uFEFF/,''));
@@ -35,6 +37,6 @@ const database=new DatabaseSync(path.join(data,'workbench.db'),{readOnly:true});
 try{await backup(database,path.join(target,'user-data','workbench.db'))}finally{database.close()}
 const saved=new DatabaseSync(path.join(target,'user-data','workbench.db'),{readOnly:true});
 try{if(!saved.prepare('PRAGMA quick_check').all().every(r=>Object.values(r)[0]==='ok'))throw Error('Snapshot integrity failure')}finally{saved.close()}
-const report={Kind:'program-and-database',BackupRoot:target,PreviousFullBackup:previousFull,Verified:true,ProgramFiles:records.length,CreatedAt:new Date().toISOString()};
+const report={Kind:'program-and-database',BackupRoot:target,PreviousFullBackup:previousFull,PreviousBackupDataContext:prior.DataContext ?? null,DataContext:dataContext,Verified:true,ProgramFiles:records.length,CreatedAt:new Date().toISOString()};
 fs.writeFileSync(path.join(target,'manifest.json'),JSON.stringify({...report,Files:records},null,2));
 console.log(JSON.stringify(report));

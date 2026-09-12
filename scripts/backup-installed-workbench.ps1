@@ -2,6 +2,8 @@ $ErrorActionPreference = 'Stop'
 $installRoot = 'D:\SJdownloads\创作平台'
 $dataRoot = 'C:\Users\Administrator\AppData\Roaming\short-video-matrix-workbench'
 $backupBase = 'D:\SJdownloads\创作平台备份'
+$dataContext = & (Join-Path $PSScriptRoot 'installed-data-context.ps1') -CallerProcessId $PID -DataRoot $dataRoot
+$dataRoot = $dataContext.Source.PhysicalPath
 
 function Assert-AppClosed {
   $running = @(Get-CimInstance Win32_Process | Where-Object {
@@ -30,7 +32,10 @@ foreach ($entry in @(@{ Source = $dataRoot; Name = 'user-data' }, @{ Source = $i
   if ($files.Count -ne $copied.Count) { throw '备份文件数量不匹配。' }
   $index = 0
   foreach ($file in $files) {
-    $relative = [IO.Path]::GetRelativePath($source, $file.FullName)
+    # Keep relative-path handling compatible with both PowerShell runtimes.
+    $sourcePrefix = $source.TrimEnd('\') + '\'
+    if (-not $file.FullName.StartsWith($sourcePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw '源文件超出备份目录。' }
+    $relative = $file.FullName.Substring($sourcePrefix.Length)
     $copy = Join-Path $destination $relative
     if ($file.Length -ne (Get-Item -LiteralPath $copy).Length) { throw '备份文件大小不匹配。' }
     $beforeHash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
@@ -49,7 +54,8 @@ $report = [pscustomobject]@{
   FileCount = $records.Count
   TotalBytes = ($records | Measure-Object -Property Bytes -Sum).Sum
   Verified = $true
+  DataContext = $dataContext
   Files = $records
 }
 [IO.File]::WriteAllText((Join-Path $backupRoot 'manifest.json'), ($report | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
-$report | Select-Object CreatedAt, BackupRoot, FileCount, TotalBytes, Verified | ConvertTo-Json -Compress
+$report | Select-Object CreatedAt, BackupRoot, FileCount, TotalBytes, Verified, DataContext | ConvertTo-Json -Depth 4 -Compress

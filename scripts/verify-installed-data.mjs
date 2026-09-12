@@ -1,12 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { assertInstalledDataContext } from './installed-data-context.mjs';
 
+const dataContext = assertInstalledDataContext('C:\\Users\\Administrator\\AppData\\Roaming\\short-video-matrix-workbench');
 const backupRoot = process.argv[2];
 if (!backupRoot || !fs.existsSync(path.join(backupRoot, 'manifest.json')))
   throw new Error('A verified backup directory is required');
 const beforeRoot = path.join(backupRoot, 'user-data');
-const currentRoot = 'C:\\Users\\Administrator\\AppData\\Roaming\\short-video-matrix-workbench';
+const manifest = JSON.parse(fs.readFileSync(path.join(backupRoot, 'manifest.json'), 'utf8').replace(/^\uFEFF/, ''));
+if (manifest.Verified !== true) throw new Error('Backup manifest is not verified');
+const currentRoot = dataContext.Source.PhysicalPath;
 function snapshot(root) {
   const db = new DatabaseSync(path.join(root, 'workbench.db'), { readOnly: true });
   try {
@@ -47,5 +51,5 @@ for (const relative of ['profiles/Partitions', 'global-browser-profiles']) {
   profiles[relative] = { before: old.length, after: current.length, retained: old.filter(name => current.includes(name)).length };
   retained &&= profiles[relative].retained === old.length;
 }
-console.log(JSON.stringify({ userDataPath: currentRoot, backupDatabaseIntegrity: before.integrity, databaseIntegrity: after.integrity, compatibleCheckInfoColumn: after.checkInfoColumn, counts, profiles, retained }, null, 2));
+console.log(JSON.stringify({ userDataPath: currentRoot, dataContext, backupDataContext: manifest.DataContext ?? null, backupDatabaseIntegrity: before.integrity, databaseIntegrity: after.integrity, compatibleCheckInfoColumn: after.checkInfoColumn, counts, profiles, retained }, null, 2));
 if (!retained) process.exitCode = 1;
