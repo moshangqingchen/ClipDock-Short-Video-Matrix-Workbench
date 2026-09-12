@@ -29,6 +29,21 @@ Thumbs.db
 # local scratch
 tmp-*
 __pycache__/
+output/
+docs/.compare/
+docs/*.results.json
+docs/*.checkpoints.json
+docs/*.comment-delta.json
+docs/network-startup-before.json
+docs/network-startup-after.json
+docs/network-stage2-rule-merge-result.json
+.workbuddy/
+/index-*.js
+
+# local credentials
+.env
+.env.*
+!.env.example
 
 shot-*.png
 eslint-report.json

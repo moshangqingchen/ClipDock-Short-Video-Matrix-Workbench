@@ -1,4 +1,5 @@
 import { DEFAULT_SETTINGS, type AppSettings, type AuditEvent } from "@shared/types";
+import { settingsPatchSchema } from "@shared/ipc";
 import type { Database } from "../database";
 
 const SETTINGS_KEY = "app";
@@ -12,7 +13,7 @@ export class SettingsRepository {
     ]);
     if (!row) return { ...DEFAULT_SETTINGS };
     try {
-      const parsed = JSON.parse(row.value_json) as Partial<AppSettings>;
+      const parsed = settingsPatchSchema.parse(JSON.parse(row.value_json));
       return { ...DEFAULT_SETTINGS, ...parsed };
     } catch {
       return { ...DEFAULT_SETTINGS };
@@ -20,7 +21,7 @@ export class SettingsRepository {
   }
 
   patch(patch: Partial<AppSettings>): AppSettings {
-    const next = { ...this.get(), ...stripUndefined(patch) };
+    const next = { ...this.get(), ...stripUndefined(settingsPatchSchema.parse(patch)) };
     this.db.run(
       `INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)
        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,

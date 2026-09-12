@@ -1,6 +1,7 @@
-import { app, BaseWindow, screen, shell, WebContentsView } from "electron";
+import { app, BaseWindow, screen, session, shell, WebContentsView } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureShellNetworkGuard } from "@main/network/shell-network-guard";
 import {
   clampWindowState,
   defaultWindowState,
@@ -55,6 +56,7 @@ function isTrustedShellUrl(url: string): boolean {
  * requires Node access: it talks to the main process only through preload.
  */
 export function createMainWindow(userDataPath: string): MainWindow {
+  ensureShellNetworkGuard(session.defaultSession, resolveDevUrl());
   const workArea = screen.getPrimaryDisplay().workArea;
   const stateFile = path.join(userDataPath, "window-state.json");
   const saved = readWindowState(stateFile);
@@ -114,6 +116,7 @@ export function createMainWindow(userDataPath: string): MainWindow {
 
   // Persist bounds (debounced) and restore maximize state.
   let lastNormal = initial.bounds;
+  let closeRequested = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const persist = (immediate = false) => {
     if (timer) clearTimeout(timer);
@@ -128,7 +131,10 @@ export function createMainWindow(userDataPath: string): MainWindow {
   };
   window.on("resize", () => persist());
   window.on("move", () => persist());
-  window.on("close", () => persist(true));
+  window.on("close", () => {
+    closeRequested = true;
+    persist(true);
+  });
   if (initial.maximized) window.maximize();
 
   const loadShell = async () => {
@@ -138,7 +144,13 @@ export function createMainWindow(userDataPath: string): MainWindow {
   };
 
   wc.once("did-finish-load", () => {
-    if (!window.isDestroyed() && !window.isVisible()) window.show();
+    if (
+      process.env.SV_WORKBENCH_SMOKE !== "1" &&
+      !closeRequested &&
+      !window.isDestroyed() &&
+      !window.isVisible()
+    )
+      window.show();
   });
 
   return {

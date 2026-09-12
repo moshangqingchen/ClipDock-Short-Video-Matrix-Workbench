@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { PlatformLogo } from "@renderer/components/ui/PlatformLogo";
+import { AccountLoginStatus } from "@renderer/components/ui/AccountLoginStatus";
 import {
   Activity,
   AlertTriangle,
@@ -22,7 +24,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { getPlatform } from "@shared/platforms";
+import { getPlatform, platformEntryUrl } from "@shared/platforms";
 import type { Account } from "@shared/types";
 import {
   Avatar,
@@ -30,7 +32,6 @@ import {
   Button,
   EmptyState,
   IconButton,
-  STATUS_LABEL,
   STATUS_TONE,
   Spinner,
   StatusDot,
@@ -42,6 +43,7 @@ import { AccountMenu } from "@renderer/features/accounts/AccountMenu";
 import { ViewHost } from "./ViewHost";
 import { DataDrawer } from "./DataDrawer";
 import { ObservePanel } from "./ObservePanel";
+import { WorkspaceActions } from "@renderer/components/ui/WorkspaceActions";
 import styles from "./workspace.module.css";
 
 type QuickRoute = "site" | "home" | "upload" | "analytics" | "works" | "comments";
@@ -62,6 +64,7 @@ const QUICK: Array<{ route: QuickRoute; label: string; icon: typeof Globe }> = [
 
 export function AccountWorkspace() {
   const activeId = useUi((s) => s.activeAccountId);
+  const entryRevision = useUi((s) => s.accountEntryRevision);
   const account = useAccounts((s) => s.accounts.find((a) => a.id === activeId));
   const setAddAccountOpen = useUi((s) => s.setAddAccountOpen);
 
@@ -81,10 +84,11 @@ export function AccountWorkspace() {
       </div>
     );
   }
-  return <Workspace key={account.id} account={account} />;
+  return <Workspace key={`${account.id}:${entryRevision}`} account={account} />;
 }
 
 function Workspace({ account }: { account: Account }) {
+  const entryUrl = useUi((s) => s.accountEntryUrl);
   const platform = getPlatform(account.platformId);
   const view = useViews((s) => s.states[account.id]);
   const drawerOpen = useUi((s) => s.drawerOpen);
@@ -176,14 +180,13 @@ function Workspace({ account }: { account: Account }) {
             color={platform.color}
             size={32}
             round
-            badge={platform.glyph}
+            badge={<PlatformLogo platformId={platform.id} size={16} />}
             badgeColor={platform.color}
           />
           <div className={styles.identityText}>
             <strong title={account.displayName}>{account.displayName}</strong>
             <span>
-              <StatusDot status={account.status} />
-              {STATUS_LABEL[account.status]}
+              <AccountLoginStatus account={account} />
               {account.handle ? <span className="truncate">· {account.handle}</span> : null}
             </span>
           </div>
@@ -226,7 +229,7 @@ function Workspace({ account }: { account: Account }) {
             onBlur={() => setEditing(false)}
             onChange={(e) => setAddress(e.target.value)}
             onKeyDown={(e) => e.key === "Escape" && setEditing(false)}
-            placeholder={platform.routes.home}
+            placeholder={platformEntryUrl(platform.id)}
             spellCheck={false}
             aria-label="页面地址"
           />
@@ -234,26 +237,17 @@ function Workspace({ account }: { account: Account }) {
         </form>
 
         <div className={styles.quickLinks}>
-          {quickLinks.map((q) => (
-            <button
-              key={q.route}
-              type="button"
-              className={cx(styles.quickLink, !observing && activeQuick === q.route && styles.active)}
-              onClick={() => go(q.route)}
-            >
-              <q.icon size={13} />
-              {q.label}
-            </button>
-          ))}
-          <button
-            type="button"
-            className={cx(styles.quickLink, styles.observeLink, observing && styles.active)}
-            onClick={toggleObserve}
-            title="查看该账号的今日观测与总观测数据"
-          >
-            <Activity size={13} />
-            数据观测
-          </button>
+          <WorkspaceActions
+            items={[
+              ...quickLinks.map((q) => ({
+                icon: q.icon,
+                label: q.label,
+                active: !observing && activeQuick === q.route,
+                onClick: () => go(q.route),
+              })),
+              { icon: Activity, label: "数据观测", active: observing, onClick: toggleObserve },
+            ]}
+          />
         </div>
 
         <div className={styles.topbarActions}>
@@ -277,7 +271,7 @@ function Workspace({ account }: { account: Account }) {
       <div className={styles.hostWrap}>
         {observing ? <ObservePanel account={account} onClose={toggleObserve} /> : null}
         {hasBridge ? (
-          <ViewHost accountId={account.id} onError={setHostError} />
+          <ViewHost accountId={account.id} initialUrl={entryUrl} onError={setHostError} />
         ) : (
           <div className={styles.placeholder}>
             <div className={styles.placeholderCard}>
@@ -305,18 +299,33 @@ function Workspace({ account }: { account: Account }) {
         ) : null}
         {view &&
         !view.loading &&
-        (account.status === "offline" || account.status === "unknown") &&
+        (account.checkInfo?.state !== "confirmed" ||
+          account.status === "offline" ||
+          account.status === "unknown") &&
         !view.isLoginPage ? (
           <div className={styles.statusBar}>
             <StatusDot status={account.status} />
-            {account.status === "offline" ? "未检测到登录态,请在页面内扫码登录" : "正在检测登录状态…"}
+            {account.checkInfo?.reason ?? "等待平台网页确认身份"}
           </div>
         ) : null}
         {error ? (
           <div className={styles.errorBar}>
             <AlertTriangle size={14} />
             <span>{humanizeError(error)}</span>
-            <Button size="sm" variant="secondary" onClick={() => go("home")}>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                setHostError(null);
+                void api.views
+                  .reload(account.id)
+                  .catch((error: Error) =>
+                    useToasts
+                      .getState()
+                      .push({ kind: "error", title: "重新加载失败", message: error.message }),
+                  );
+              }}
+            >
               重新加载
             </Button>
             <IconButton

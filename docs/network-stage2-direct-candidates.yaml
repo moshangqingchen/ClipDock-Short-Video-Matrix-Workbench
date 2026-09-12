@@ -1,0 +1,33 @@
+# 仅供人工审阅合并到现有 rules 列表；不是完整 mihomo 配置，禁止覆盖原配置。
+# 放在首条可能命中的 IP-CIDR 等不可解释规则之前；保留现有全部规则。
+# 候选仅来源于现有平台元数据，仍需登录/CDN/进程/出口验证，不自动放行账号。
+  - DOMAIN,api.bilibili.com,DIRECT
+  - DOMAIN,api.geetest.com,DIRECT
+  - DOMAIN,baijiahao.baidu.com,DIRECT
+  - DOMAIN,captcha.gtimg.com,DIRECT
+  - DOMAIN,captcha.kuaishou.com,DIRECT
+  - DOMAIN,captcha.qq.com,DIRECT
+  - DOMAIN,captcha.zt.kuaishou.com,DIRECT
+  - DOMAIN,channels.weixin.qq.com,DIRECT
+  - DOMAIN,cp.kuaishou.com,DIRECT
+  - DOMAIN,creator.douyin.com,DIRECT
+  - DOMAIN,creator.xiaohongshu.com,DIRECT
+  - DOMAIN,gcaptcha4.geetest.com,DIRECT
+  - DOMAIN,geetest.com,DIRECT
+  - DOMAIN,global.captcha.gtimg.com,DIRECT
+  - DOMAIN,gt4.geetest.com,DIRECT
+  - DOMAIN,member.bilibili.com,DIRECT
+  - DOMAIN,passport.bilibili.com,DIRECT
+  - DOMAIN,rmc.bytedance.com,DIRECT
+  - DOMAIN,sec.kuaishou.com,DIRECT
+  - DOMAIN,sg.captcha.qcloud.com,DIRECT
+  - DOMAIN,ssl.captcha.qq.com,DIRECT
+  - DOMAIN,static.geetest.com,DIRECT
+  - DOMAIN,t.captcha.qq.com,DIRECT
+  - DOMAIN,verify.snssdk.com,DIRECT
+  - DOMAIN,verify.zijieapi.com,DIRECT
+  - DOMAIN,wappass.baidu.com,DIRECT
+  - DOMAIN,www.bilibili.com,DIRECT
+  - DOMAIN,www.douyin.com,DIRECT
+  - DOMAIN,www.kuaishou.com,DIRECT
+  - DOMAIN,www.xiaohongshu.com,DIRECT

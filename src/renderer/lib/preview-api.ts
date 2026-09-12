@@ -1,12 +1,28 @@
+import { globalPublishInputSchema, type GlobalPublishRecord } from "@shared/global-workspace";
 import type { WorkbenchApi, ToastEvent } from "@shared/ipc";
-import { PLATFORMS, PLATFORM_IDS, type PlatformId } from "@shared/platforms";
+import { checkingNetworkSnapshot, DEFAULT_NETWORK_SETTINGS, networkSettingsSchema } from "@shared/network";
+import type { CredentialRef, CredentialMetadata } from "@shared/credentials";
+import type { CollectJob } from "@shared/collect-jobs";
+import {
+  globalAccountCreateSchema,
+  globalAccountIdSchema,
+  type GlobalAccount,
+} from "@shared/global-accounts";
+import { globalAppConfigureSchema, unconfiguredGlobalApp, type GlobalAppMetadata } from "@shared/global-apps";
+import {
+  GLOBAL_PLATFORM_IDS,
+  PLATFORMS,
+  PLATFORM_IDS,
+  platformEntryUrl,
+  type GlobalPlatformId,
+  type PlatformId,
+} from "@shared/platforms";
 import {
   DEFAULT_SETTINGS,
   type Account,
   type AccountMetricsView,
   type AppSettings,
   type Asset,
-  type CollectRun,
   type MetricDelta,
   type MetricName,
   type OverviewView,
@@ -71,6 +87,19 @@ export function createPreviewApi(): WorkbenchApi {
   })) as Account[];
 
   const settings: AppSettings = { ...DEFAULT_SETTINGS };
+  const globalAccounts: GlobalAccount[] = [];
+  const globalPublishRecords: GlobalPublishRecord[] = [];
+  const globalApps = new Map<GlobalPlatformId, GlobalAppMetadata>();
+  let networkSettings = { ...DEFAULT_NETWORK_SETTINGS };
+  const credentialMetadata = (ref: CredentialRef): CredentialMetadata => ({
+    ...ref,
+    hasCredential: false,
+    available: false,
+    encryptionAvailable: false,
+    state: "missing",
+    createdAt: null,
+    updatedAt: null,
+  });
   const views = new Map<string, ViewState>();
   const assets: Asset[] = [];
   const publish: PublishRecord[] = [];
@@ -175,6 +204,211 @@ export function createPreviewApi(): WorkbenchApi {
   const toast = (t: ToastEvent) => emit("toast", t);
 
   return {
+    globalUploads: {
+      submit: async () => {
+        throw new Error("GLOBAL_UPLOAD_UNAVAILABLE");
+      },
+      list: async () => [],
+      cancel: async () => null,
+      check: async () => {
+        throw new Error("GLOBAL_UPLOAD_UNAVAILABLE");
+      },
+      onChanged: () => () => undefined,
+    },
+    globalRead: {
+      get: async () => null,
+    },
+    globalJobs: {
+      submit: async () => {
+        throw new Error("GLOBAL_READ_UNAVAILABLE");
+      },
+      list: async () => [],
+      cancel: async () => null,
+      onChanged: () => () => undefined,
+    },
+    globalOAuth: {
+      state: async (id) => {
+        const account = globalAccounts.find((row) => row.id === globalAccountIdSchema.parse(id));
+        if (!account) throw new Error("GLOBAL_OAUTH_INVALID_ACCOUNT");
+        return {
+          accountId: account.id,
+          platformId: account.platformId,
+          transactionId: null,
+          phase: "idle",
+          errorCode: null,
+        };
+      },
+      start: async () => {
+        throw new Error("GLOBAL_OAUTH_UNAVAILABLE");
+      },
+      startDraft: async () => {
+        throw new Error("GLOBAL_OAUTH_UNAVAILABLE");
+      },
+      startUpload: async () => {
+        throw new Error("GLOBAL_OAUTH_UNAVAILABLE");
+      },
+      cancel: async () => {
+        throw new Error("GLOBAL_OAUTH_UNAVAILABLE");
+      },
+      onState: () => () => undefined,
+    },
+    globalApps: {
+      list: async () =>
+        GLOBAL_PLATFORM_IDS.map((id) => structuredClone(globalApps.get(id) ?? unconfiguredGlobalApp(id))),
+      configure: async (input) => {
+        const parsed = globalAppConfigureSchema.parse(input);
+        if (parsed.clientSecret !== undefined || parsed.platformId === "tiktok")
+          throw new Error("预览模式无法保存应用密钥，请使用桌面端");
+        const previous = globalApps.get(parsed.platformId);
+        const timestamp = new Date().toISOString();
+        const id = previous?.id ?? uuid();
+        const result: GlobalAppMetadata = {
+          id,
+          platformId: parsed.platformId,
+          clientId: parsed.clientId,
+          redirectPort: parsed.redirectPort,
+          createdAt: previous?.createdAt ?? timestamp,
+          updatedAt: timestamp,
+          configured: true,
+          clientSecret:
+            parsed.platformId === "x"
+              ? null
+              : credentialMetadata({ kind: "oauth_client_secret", ownerId: id }),
+        };
+        globalApps.set(parsed.platformId, result);
+        return structuredClone(result);
+      },
+      clearSecret: async (platformId) =>
+        structuredClone(globalApps.get(platformId) ?? unconfiguredGlobalApp(platformId)),
+    },
+    globalWorkspace: {
+      openLoginWindow: async () => undefined,
+      identity: async () => null,
+      checkLogin: async () => ({
+        status: "unknown",
+        subjectId: null,
+        displayName: null,
+        checkedAt: new Date().toISOString(),
+      }),
+      resetEnvironment: async () => undefined,
+      openDevTools: async () => undefined,
+      openSystemBrowser: async () => undefined,
+      works: async () => [],
+      jobs: async () => [],
+      collect: async () => {
+        throw new Error("请在桌面软件中采集官网数据");
+      },
+      cancelJob: async () => undefined,
+      publishList: async (id) =>
+        structuredClone(globalPublishRecords.filter((row) => !id || row.accountId === id)),
+      publishSave: async (raw) => {
+        const input = globalPublishInputSchema.parse(raw),
+          account = globalAccounts.find((row) => row.id === input.accountId);
+        if (!account) throw new Error("国外账号不存在");
+        const existing = globalPublishRecords.find((row) => row.id === input.id),
+          now = new Date().toISOString();
+        const record: GlobalPublishRecord = {
+          ...input,
+          id: input.id ?? uuid(),
+          platformId: account.platformId,
+          description: input.description ?? "",
+          tags: input.tags ?? [],
+          status: input.status ?? "planned",
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+        };
+        if (existing) Object.assign(existing, record);
+        else globalPublishRecords.push(record);
+        return structuredClone(record);
+      },
+      publishDelete: async (id) => {
+        const index = globalPublishRecords.findIndex((row) => row.id === id);
+        if (index >= 0) globalPublishRecords.splice(index, 1);
+      },
+      openUpload: async () => undefined,
+      attachFiles: async () => ({ attached: 0, message: "请在桌面软件中填入素材" }),
+      openWork: async () => undefined,
+      useBrowser: async () => undefined,
+      onChanged: () => () => undefined,
+    },
+    globalWeb: {
+      observation: async () => null,
+      observationHistory: async () => [],
+      readPage: async () => {
+        throw new Error("WEB_OBSERVE_CLOSED");
+      },
+      openChrome: async () => {
+        throw new Error("GLOBAL_WEB_UNAVAILABLE");
+      },
+      state: async (id) => ({ accountId: id, phase: "closed", errorCode: null }),
+      open: async () => {
+        throw new Error("GLOBAL_WEB_UNAVAILABLE");
+      },
+      openExternal: async () => {
+        throw new Error("GLOBAL_WEB_UNAVAILABLE");
+      },
+      close: async (id) => ({ accountId: id, phase: "closed", errorCode: null }),
+      show: async () => undefined,
+      hide: async () => undefined,
+      go: async () => {
+        throw new Error("GLOBAL_WEB_ROUTE_UNAVAILABLE");
+      },
+      command: async () => undefined,
+      onChanged: () => () => undefined,
+    },
+    globalAccounts: {
+      update: async (id, input) => {
+        const account = globalAccounts.find((row) => row.id === id);
+        if (!account) throw new Error("国外账号不存在");
+        Object.assign(account, input, { updatedAt: new Date().toISOString() });
+        return { ...account };
+      },
+      list: async () => globalAccounts.map((account) => ({ ...account })),
+      create: async (input) => {
+        const parsed = globalAccountCreateSchema.parse(input);
+        const timestamp = new Date().toISOString();
+        const account: GlobalAccount = {
+          id: uuid(),
+          platformId: parsed.platformId,
+          displayName: parsed.displayName || parsed.platformId,
+          remoteId: null,
+          authStatus: "unauthorized",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        globalAccounts.push(account);
+        return { ...account };
+      },
+      delete: async (id) => {
+        const index = globalAccounts.findIndex((account) => account.id === globalAccountIdSchema.parse(id));
+        if (index >= 0) globalAccounts.splice(index, 1);
+      },
+      disconnect: async (id) => {
+        const account = globalAccounts.find((item) => item.id === globalAccountIdSchema.parse(id));
+        if (!account) throw new Error("国际账号不存在");
+        account.remoteId = null;
+        account.authStatus = "unauthorized";
+        account.updatedAt = new Date().toISOString();
+        return { ...account };
+      },
+    },
+    network: {
+      snapshot: async () => checkingNetworkSnapshot(),
+      refresh: async () => checkingNetworkSnapshot(),
+      settings: async () => ({ ...networkSettings }),
+      configure: async (input) => {
+        networkSettings = networkSettingsSchema.parse(input);
+        return { ...networkSettings };
+      },
+      directRules: async () => "# 浏览器预览不连接本机内核。请在桌面端检查实际规则。",
+    },
+    credentials: {
+      meta: async (ref) => credentialMetadata(ref),
+      set: async () => {
+        throw new Error("预览模式无法保存凭据，请使用桌面端");
+      },
+      delete: async (ref) => credentialMetadata(ref),
+    },
     accounts: {
       list: async () => accounts,
       create: async (input) => {
@@ -218,12 +452,12 @@ export function createPreviewApi(): WorkbenchApi {
       refreshProfile: async (id) => accounts.find((a) => a.id === id)!,
     },
     views: {
-      show: async (id) => {
+      show: async (id, _bounds, enterHomepage = false) => {
         const state: ViewState = {
           accountId: id,
           attached: true,
           visible: true,
-          url: PLATFORMS[accounts.find((a) => a.id === id)!.platformId].routes.home,
+          url: (!enterHomepage && views.get(id)?.url) || platformEntryUrl(accounts.find((a) => a.id === id)!.platformId),
           title: "预览模式",
           loading: false,
           canGoBack: false,
@@ -294,18 +528,22 @@ export function createPreviewApi(): WorkbenchApi {
       collectNow: async (id) => {
         toast({ kind: "info", title: "预览模式", message: "桌面端才会真正采集数据" });
         const targets = id ? accounts.filter((a) => a.id === id) : accounts;
-        return targets.map<CollectRun>((a) => ({
+        return targets.map<CollectJob>((a) => ({
+          id: uuid(),
           accountId: a.id,
-          platformId: a.platformId,
+          state: "cancelled",
+          createdAt: now,
+          updatedAt: now,
           startedAt: now,
           finishedAt: now,
-          status: "skipped",
           trigger: "manual",
           message: "预览模式",
-          metricsWritten: 0,
-          worksWritten: 0,
+          runId: null,
+          attempts: 0,
         }));
       },
+      jobs: async () => [],
+      cancelJob: async () => null,
       runs: async (id) => [
         metricsFor(
           accounts.find((a) => a.id === id)!,

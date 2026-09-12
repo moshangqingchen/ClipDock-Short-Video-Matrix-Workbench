@@ -5,9 +5,9 @@
   --font-sans:
     "Inter", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
-  --text-xs: 11px;
-  --text-sm: 12.5px;
-  --text-md: 13.5px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
   --text-lg: 15px;
   --text-xl: 18px;
   --text-2xl: 22px;
@@ -37,10 +37,10 @@
   --dur-slow: 320ms;
 
   /* layout */
-  --rail-w: 220px;
+  --rail-w: 200px;
   --rail-w-collapsed: 64px;
-  --sidebar-w: 288px;
-  --topbar-h: 56px;
+  --sidebar-w: 264px;
+  --topbar-h: 96px;
   --drawer-w: 380px;
 
   /* brand */
@@ -119,4 +119,10 @@
   --scrollbar: rgba(255, 255, 255, 0.2);
   --brand-500: #4d99ff;
   --brand-600: #2673ff;
+}
+
+@media (max-width: 1100px) {
+  :root {
+    --sidebar-w: 240px;
+  }
 }

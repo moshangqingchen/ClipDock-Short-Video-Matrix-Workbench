@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, ClipboardCopy, ExternalLink, FileUp, Plus, Send, Trash2, X } from "lucide-react";
-import { PLATFORMS } from "@shared/platforms";
-import type { PublishRecord } from "@shared/types";
+import { PLATFORMS, type PlatformId, type GlobalPlatformId } from "@shared/platforms";
+import type { PublishRecord as DomesticPublishRecord, PublishRecordInput } from "@shared/types";
 import {
   Avatar,
   Badge,
@@ -18,52 +18,92 @@ import {
   formatDateTime,
 } from "@renderer/components/ui";
 import { api, hasBridge } from "@renderer/lib/api";
-import { useAccounts, useToasts, useUi } from "@renderer/store";
+import { useAccounts, useGlobalAccounts, useToasts, useUi } from "@renderer/store";
 import { AssetGrid, useAssets } from "@renderer/features/assets/AssetsPage";
 import layout from "@renderer/features/layout/layout.module.css";
 import styles from "./publish.module.css";
 
+type PublishRecord = Omit<DomesticPublishRecord, "platformId"> & {
+  platformId: PlatformId | GlobalPlatformId;
+};
+type Draft = { title: string; description: string; tags: string[]; selected: string[]; recordId?: string };
+const drafts = new Map<string, Draft>();
+const composerPlatform = (id: PublishRecord["platformId"]) => {
+  if (id in PLATFORMS) return PLATFORMS[id as keyof typeof PLATFORMS];
+  const name = { youtube: "YouTube", tiktok: "TikTok", x: "X" }[id as "youtube" | "tiktok" | "x"];
+  return { name, shortName: name, color: id === "youtube" ? "#e11d48" : "#172033" };
+};
+const globalPublisher = {
+  list: (id?: string): Promise<PublishRecord[]> => api.globalWorkspace.publishList(id),
+  save: (input: PublishRecordInput): Promise<PublishRecord> => api.globalWorkspace.publishSave(input),
+  delete: (id: string) => api.globalWorkspace.publishDelete(id),
+  openUpload: (id: string) => api.globalWorkspace.openUpload(id),
+  attachFiles: (id: string, assets: string[]) => api.globalWorkspace.attachFiles(id, assets),
+};
 export function PublishPage() {
-  const accounts = useAccounts((s) => s.accounts);
-  const activeId = useUi((s) => s.activeAccountId);
-  const openAccount = useUi((s) => s.openAccount);
-  const pushOverlay = useUi((s) => s.pushOverlay);
-  const popOverlay = useUi((s) => s.popOverlay);
+  const scope = useUi((s) => s.creatorMode),
+    domestic = useAccounts((s) => s.accounts),
+    global = useGlobalAccounts((s) => s.accounts);
+  const domesticId = useUi((s) => s.activeAccountId),
+    globalId = useUi((s) => s.activeGlobalAccountId);
+  const rows = scope === "global" ? global : domestic,
+    selected = scope === "global" ? globalId : domesticId;
+  const accountId = rows.some((row) => row.id === selected) ? selected : (rows[0]?.id ?? null);
+  return <PublishComposer key={`${scope}:${accountId}`} scope={scope} currentAccountId={accountId} />;
+}
+function PublishComposer({
+  scope,
+  currentAccountId,
+}: {
+  scope: "domestic" | "global";
+  currentAccountId: string | null;
+}) {
+  const domestic = useAccounts((s) => s.accounts),
+    global = useGlobalAccounts((s) => s.accounts),
+    identities = useGlobalAccounts((s) => s.identities);
+  const accounts =
+    scope === "domestic"
+      ? domestic
+      : global.map((row) => ({ ...row, avatarUrl: null, status: identities[row.id]?.status ?? "unknown" }));
+  const publisher = scope === "global" ? globalPublisher : api.publish;
+  const draftKey = `${scope}:${currentAccountId}`;
+  const initialDraft = drafts.get(draftKey);
+  const activeId = currentAccountId;
+  const openAccount = scope === "global" ? useUi.getState().openGlobalAccount : useUi.getState().openAccount;
   const { assets, reload } = useAssets();
 
-  const [chosenAccountId, setAccountId] = useState<string | null>(activeId ?? null);
+  const chosenAccountId = activeId;
+  const setAccountId = (id: string) =>
+    scope === "global" ? useUi.getState().selectGlobalAccount(id) : useUi.getState().selectAccount(id);
   // Fall back to the first account without effect-driven state sync.
   const accountId =
     chosenAccountId && accounts.some((a) => a.id === chosenAccountId)
       ? chosenAccountId
       : (accounts[0]?.id ?? null);
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [tags, setTags] = useState<string[]>([]);
+  const [title, setTitle] = useState(initialDraft?.title ?? "");
+  const [description, setDescription] = useState(initialDraft?.description ?? "");
+  const [tags, setTags] = useState<string[]>(initialDraft?.tags ?? []);
   const [tagInput, setTagInput] = useState("");
-  const [selected, setSelected] = useState<string[]>([]);
+  const [selected, setSelected] = useState<string[]>([
+    ...new Set([...(initialDraft?.selected ?? []), ...useUi.getState().selectedAssetIds]),
+  ]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [records, setRecords] = useState<PublishRecord[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
-  const [recordId, setRecordId] = useState<string | undefined>(undefined);
+  const [recordId, setRecordId] = useState<string | undefined>(initialDraft?.recordId);
 
   const account = accounts.find((a) => a.id === accountId) ?? null;
-  const platform = account ? PLATFORMS[account.platformId] : null;
+  const platform = account ? composerPlatform(account.platformId) : null;
+  useEffect(() => {
+    drafts.set(draftKey, { title, description, tags, selected, recordId });
+  }, [draftKey, title, description, tags, selected, recordId]);
 
   useEffect(() => {
-    void api.publish
+    void publisher
       .list()
       .then(setRecords)
       .catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
-    if (pickerOpen) {
-      pushOverlay();
-      return () => popOverlay();
-    }
-    return undefined;
-  }, [pickerOpen, pushOverlay, popOverlay]);
+  }, [publisher]);
 
   const selectedAssets = useMemo(
     () => (assets ?? []).filter((a) => selected.includes(a.id)),
@@ -94,7 +134,7 @@ export function PublishPage() {
     if (!account) return;
     setBusy("save");
     try {
-      const record = await api.publish.save({
+      const record = await publisher.save({
         id: recordId,
         accountId: account.id,
         assetIds: selected,
@@ -104,7 +144,7 @@ export function PublishPage() {
         status,
       });
       setRecordId(record.id);
-      setRecords(await api.publish.list());
+      setRecords(await publisher.list());
       useToasts
         .getState()
         .push({ kind: "success", title: status === "published" ? "已记录为已发布" : "发布计划已保存" });
@@ -119,7 +159,7 @@ export function PublishPage() {
     if (!account) return;
     setBusy("open");
     try {
-      await api.publish.openUpload(account.id);
+      await publisher.openUpload(account.id);
       openAccount(account.id);
     } catch (error) {
       useToasts
@@ -134,7 +174,7 @@ export function PublishPage() {
     if (!account || selected.length === 0) return;
     setBusy("attach");
     try {
-      const result = await api.publish.attachFiles(account.id, selected);
+      const result = await publisher.attachFiles(account.id, selected);
       if (result.attached > 0) {
         useToasts.getState().push({
           kind: "success",
@@ -157,6 +197,13 @@ export function PublishPage() {
   };
 
   const loadRecord = (record: PublishRecord) => {
+    drafts.set(`${scope}:${record.accountId}`, {
+      title: record.title,
+      description: record.description,
+      tags: record.tags,
+      selected: record.assetIds,
+      recordId: record.id,
+    });
     setRecordId(record.id);
     setAccountId(record.accountId);
     setTitle(record.title);
@@ -203,7 +250,7 @@ export function PublishPage() {
               <Field label="发布到">
                 <div className={styles.accountPick}>
                   {accounts.map((a) => {
-                    const p = PLATFORMS[a.platformId];
+                    const p = composerPlatform(a.platformId);
                     return (
                       <button
                         key={a.id}
@@ -401,7 +448,7 @@ export function PublishPage() {
           ) : (
             records.map((record) => {
               const a = accounts.find((x) => x.id === record.accountId);
-              const p = PLATFORMS[record.platformId];
+              const p = composerPlatform(record.platformId);
               return (
                 <div key={record.id} className={styles.recordRow}>
                   <Avatar
@@ -433,8 +480,8 @@ export function PublishPage() {
                     icon={Trash2}
                     label="删除记录"
                     onClick={async () => {
-                      await api.publish.delete(record.id);
-                      setRecords(await api.publish.list());
+                      await publisher.delete(record.id);
+                      setRecords(await publisher.list());
                       if (recordId === record.id) resetForm();
                     }}
                   />

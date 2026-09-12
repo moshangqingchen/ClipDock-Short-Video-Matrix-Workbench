@@ -1,34 +1,36 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { PlatformLogo } from "@renderer/components/ui/PlatformLogo";
+import { AccountLoginStatus } from "@renderer/components/ui/AccountLoginStatus";
+import { AccountEgressBadge } from "@renderer/components/ui/AccountEgressBadge";
+import { api } from "@renderer/lib/api";
+import { usePlatformCollapse } from "./usePlatformCollapse";
 import { ChevronDown, MoreHorizontal, Plus, RefreshCw, Search, Zap } from "lucide-react";
 import { PLATFORM_LIST, type PlatformId } from "@shared/platforms";
 import type { Account } from "@shared/types";
-import {
-  Avatar,
-  Button,
-  IconButton,
-  STATUS_LABEL,
-  StatusDot,
-  TextInput,
-  cx,
-  formatNumber,
-} from "@renderer/components/ui";
-import { useAccounts, useUi, useViews } from "@renderer/store";
+import { Avatar, Button, IconButton, TextInput, cx, formatNumber } from "@renderer/components/ui";
+import { useAccounts, useUi, useViews, useToasts } from "@renderer/store";
+import { useNetwork } from "@renderer/store/network";
 import { AccountMenu } from "@renderer/features/accounts/AccountMenu";
 import { useAccountFollowers } from "@renderer/features/accounts/useAccountFollowers";
+import { CreatorModeSelect } from "@renderer/features/creator/CreatorModeSelect";
 import styles from "./layout.module.css";
 
 export function AccountSidebar() {
   const accounts = useAccounts((s) => s.accounts);
   const loaded = useAccounts((s) => s.loaded);
+  const loadError = useAccounts((s) => s.loadError);
   const load = useAccounts((s) => s.load);
   const activeId = useUi((s) => s.activeAccountId);
   const openAccount = useUi((s) => s.openAccount);
+  const selectAccount = useUi((s) => s.selectAccount);
+  const route = useUi((s) => s.route);
   const setAddAccountOpen = useUi((s) => s.setAddAccountOpen);
   const viewStates = useViews((s) => s.states);
   const [query, setQuery] = useState("");
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [collapsed, setCollapsed] = usePlatformCollapse("domestic");
   const [menu, setMenu] = useState<{ account: Account; anchor: DOMRect } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const refreshingRef = useRef(false);
   const followers = useAccountFollowers(accounts);
 
   const groups = useMemo(() => {
@@ -38,7 +40,10 @@ export function AccountSidebar() {
       accounts: accounts.filter(
         (a) =>
           a.platformId === platform.id &&
-          (!q || a.displayName.toLowerCase().includes(q) || (a.handle ?? "").toLowerCase().includes(q)),
+          (!q ||
+            `${platform.name} ${platform.shortName} ${platform.id} ${a.displayName} ${a.handle ?? ""} ${a.externalId ?? ""}`
+              .toLowerCase()
+              .includes(q)),
       ),
     })).filter((g) => g.accounts.length > 0 || !q);
   }, [accounts, query]);
@@ -46,25 +51,53 @@ export function AccountSidebar() {
   const online = accounts.filter((a) => a.status === "online" || a.status === "expiring").length;
 
   const refresh = async () => {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
     setRefreshing(true);
     try {
       await load();
+      const ids = useAccounts.getState().accounts.map((a) => a.id);
+      let cursor = 0;
+      let failed = 0;
+      const worker = async () => {
+        while (cursor < ids.length) {
+          const id = ids[cursor++];
+          try {
+            const account = await api.accounts.checkStatus(id);
+            if (useAccounts.getState().byId(id)) useAccounts.getState().upsert(account);
+          } catch {
+            failed++;
+          }
+        }
+      };
+      await Promise.all([worker(), worker()]);
+      useToasts
+        .getState()
+        .push({
+          kind: failed ? "warning" : "info",
+          title: failed ? `${failed} 个账号检查失败，可重试` : "账号检查完成",
+          message: "各账号的检查结果已显示在列表中",
+        });
+    } catch {
+      useToasts.getState().push({ kind: "error", title: "账号列表刷新失败，请重试" });
     } finally {
-      setTimeout(() => setRefreshing(false), 400);
+      refreshingRef.current = false;
+      setRefreshing(false);
     }
   };
 
   return (
-    <aside className={styles.sidebar} aria-label="账号列表">
+    <aside className={styles.sidebar} aria-label="国内账号列表">
       <div className={styles.sidebarHead}>
         <div className={styles.sidebarTitle}>
-          <div>
-            <span className={styles.eyebrow}>ACCOUNTS</span>
-            <h2>账号</h2>
+          <div style={{ minWidth: 0 }}>
+            <span className={styles.eyebrow}>DOMESTIC ACCOUNTS</span>
+            <CreatorModeSelect mode="domestic" />
           </div>
           <IconButton
             icon={RefreshCw}
             label="刷新"
+            disabled={refreshing}
             onClick={refresh}
             style={refreshing ? { animation: "spin 0.8s linear infinite" } : undefined}
           />
@@ -85,25 +118,34 @@ export function AccountSidebar() {
           <strong className="num">{online}</strong>在线
         </div>
         <div>
-          <strong className="num">{Object.keys(viewStates).length}</strong>已加载
+          <strong className="num">
+            {
+              Object.values(viewStates).filter(
+                (v) => !v.lifecycle || ["ready", "loading"].includes(v.lifecycle),
+              ).length
+            }
+          </strong>
+          已加载
         </div>
       </div>
       <div className={styles.tree}>
         {groups.map(({ platform, accounts: rows }) => {
-          const isCollapsed = collapsed[platform.id] ?? false;
+          const isCollapsed = query.trim() ? false : (collapsed[platform.id] ?? false);
           return (
             <div key={platform.id} className={styles.group}>
-              <button
-                type="button"
-                className={cx(styles.groupHead, isCollapsed && styles.collapsed)}
-                onClick={() => setCollapsed((s) => ({ ...s, [platform.id]: !isCollapsed }))}
-              >
-                <ChevronDown size={14} className={styles.chev} />
-                <span className={styles.groupGlyph} style={{ background: platform.color }}>
-                  {platform.glyph}
-                </span>
-                <span className={styles.groupName}>{platform.name}</span>
-                <span className={styles.groupCount}>{rows.length}</span>
+              <div className={cx(styles.groupHead, isCollapsed && styles.collapsed)}>
+                <button
+                  type="button"
+                  className={styles.groupToggle}
+                  aria-expanded={!isCollapsed}
+                  aria-controls={`platform-${platform.id}`}
+                  onClick={() => setCollapsed((s) => ({ ...s, [platform.id]: !isCollapsed }))}
+                >
+                  <ChevronDown size={14} className={styles.chev} />
+                  <PlatformLogo platformId={platform.id} size={32} />
+                  <span className={styles.groupName}>{platform.name}</span>
+                  <span className={styles.groupCount}>{rows.length}</span>
+                </button>
                 <IconButton
                   icon={Plus}
                   label={`添加${platform.shortName}账号`}
@@ -115,25 +157,36 @@ export function AccountSidebar() {
                     useUi.setState({ metricsPlatform: platform.id as PlatformId });
                   }}
                 />
-              </button>
-              {!isCollapsed
-                ? rows.map((account) => (
-                    <AccountRow
-                      key={account.id}
-                      account={account}
-                      color={platform.color}
-                      active={account.id === activeId}
-                      live={Boolean(viewStates[account.id])}
-                      followers={followers[account.id]}
-                      onOpen={() => openAccount(account.id)}
-                      onMenu={(anchor) => setMenu({ account, anchor })}
-                    />
-                  ))
-                : null}
+              </div>
+              <div id={`platform-${platform.id}`} className={styles.groupChildren}>
+                {!isCollapsed
+                  ? rows.map((account) => (
+                      <AccountRow
+                        key={account.id}
+                        account={account}
+                        color={platform.color}
+                        active={account.id === activeId}
+                        live={Boolean(
+                          viewStates[account.id] &&
+                          (!viewStates[account.id].lifecycle ||
+                            ["ready", "loading"].includes(viewStates[account.id].lifecycle!)),
+                        )}
+                        followers={followers[account.id]}
+                        onOpen={() =>
+                          route !== "creator" && route !== "workspace"
+                            ? selectAccount(account.id)
+                            : openAccount(account.id)
+                        }
+                        onMenu={(anchor) => setMenu({ account, anchor })}
+                      />
+                    ))
+                  : null}
+              </div>
             </div>
           );
         })}
-        {loaded && accounts.length === 0 ? (
+        {loadError ? <p role="alert" style={{ padding: "18px 10px", color: "var(--fg-muted)" }}>{loadError}</p> : null}
+        {loaded && !loadError && accounts.length === 0 ? (
           <p
             style={{
               padding: "18px 10px",
@@ -175,33 +228,39 @@ function AccountRow({
   onOpen: () => void;
   onMenu: (anchor: DOMRect) => void;
 }) {
+  const egressLocation = useNetwork((s) =>
+    s.snapshot.accounts.find((state) => state.accountId === account.id)?.egressLocation,
+  );
   return (
     <div
       className={cx(styles.accountRow, active && styles.active)}
-      role="button"
-      tabIndex={0}
-      onClick={onOpen}
-      onKeyDown={(e) => (e.key === "Enter" ? onOpen() : undefined)}
       onContextMenu={(e) => {
         e.preventDefault();
         onMenu(new DOMRect(e.clientX, e.clientY, 0, 0));
       }}
     >
-      <Avatar src={account.avatarUrl} name={account.displayName} color={color} size={36} round />
-      <div className={styles.accountMeta}>
-        <strong>{account.displayName}</strong>
-        <span>
-          <StatusDot status={account.status} />
-          {STATUS_LABEL[account.status]}
-          {followers != null ? <span className="num">· {formatNumber(followers)} 粉丝</span> : null}
-          {live ? (
-            <span className={styles.liveTag}>
-              <Zap size={10} />
-              已加载
-            </span>
-          ) : null}
-        </span>
-      </div>
+      <button type="button" className={styles.accountOpen} onClick={onOpen} aria-pressed={active}>
+        <Avatar src={account.avatarUrl} name={account.displayName} color={color} size={20} round />
+        <div className={styles.accountMeta}>
+          <div className={styles.accountName}>
+            <strong>{account.displayName}</strong>
+            <AccountEgressBadge location={egressLocation} />
+          </div>
+          <span>
+            <AccountLoginStatus account={account} />
+            {followers != null ? <span className="num">· {formatNumber(followers)} 粉丝</span> : null}
+            {live ? (
+              <span
+                className={styles.liveTag}
+                title="账号网页已加载；此标记不代表登录状态"
+                aria-label="网页已加载"
+              >
+                <Zap size={10} />
+              </span>
+            ) : null}
+          </span>
+        </div>
+      </button>
       <IconButton
         icon={MoreHorizontal}
         label="更多操作"

@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
-import type { Account, AccountCreateInput, AccountStatus, AccountUpdateInput } from "@shared/types";
-import { getPlatform, isPlatformId } from "@shared/platforms";
+import type {
+  Account,
+  AccountCheckInfo,
+  AccountCreateInput,
+  AccountStatus,
+  AccountUpdateInput,
+} from "@shared/types";
+import { getPlatform, isCnPlatformId } from "@shared/platforms";
 import { partitionForAccount } from "@main/browser/partition";
 import type { Database } from "../database";
 
@@ -14,6 +20,7 @@ interface AccountRow extends Record<string, unknown> {
   partition: string;
   status: string;
   status_message: string | null;
+  check_info_json?: string | null;
   last_online_at: string | null;
   last_checked_at: string | null;
   session_expires_at: string | null;
@@ -26,7 +33,7 @@ interface AccountRow extends Record<string, unknown> {
 export const MAX_ACCOUNTS = 30;
 
 function toAccount(row: AccountRow): Account {
-  if (!isPlatformId(row.platform_id)) throw new Error(`Corrupt account row: ${row.id}`);
+  if (!isCnPlatformId(row.platform_id)) throw new Error(`Corrupt domestic account row: ${row.id}`);
   return {
     id: row.id,
     platformId: row.platform_id,
@@ -37,6 +44,7 @@ function toAccount(row: AccountRow): Account {
     partition: row.partition,
     status: row.status as AccountStatus,
     statusMessage: row.status_message,
+    checkInfo: readCheckInfo(row.check_info_json),
     lastOnlineAt: row.last_online_at,
     lastCheckedAt: row.last_checked_at,
     sessionExpiresAt: row.session_expires_at,
@@ -51,9 +59,10 @@ export class AccountsRepository {
   constructor(private readonly db: Database) {}
 
   list(): Account[] {
-    return this.db
-      .all<AccountRow>("SELECT * FROM accounts ORDER BY platform_id, sort_order, created_at")
-      .map(toAccount);
+    const rows = this.db.all<AccountRow>("SELECT * FROM accounts ORDER BY platform_id, sort_order, created_at");
+    // A failed/incomplete read must never look like an intentionally empty account list.
+    if (rows.length !== this.count()) throw new Error("账号列表读取不完整，请重新加载");
+    return rows.map(toAccount);
   }
 
   get(id: string): Account | undefined {
@@ -65,7 +74,13 @@ export class AccountsRepository {
     return Number(this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM accounts")?.n ?? 0);
   }
 
+  updateCheckInfo(id: string, info: AccountCheckInfo): Account | undefined {
+    this.db.run("UPDATE accounts SET check_info_json = ? WHERE id = ?", [JSON.stringify(info), id]);
+    return this.get(id);
+  }
+
   create(input: AccountCreateInput): Account {
+    if (!isCnPlatformId(input.platformId)) throw new Error("账号分区仅支持国内平台");
     if (this.count() >= MAX_ACCOUNTS) throw new Error(`最多支持 ${MAX_ACCOUNTS} 个账号`);
     const id = randomUUID();
     const now = new Date().toISOString();
@@ -127,7 +142,7 @@ export class AccountsRepository {
   clearSessionState(id: string): Account | undefined {
     const now = new Date().toISOString();
     this.db.run(
-      `UPDATE accounts SET status = 'offline', status_message = '登录环境已重置', last_online_at = NULL, session_expires_at = NULL, updated_at = ? WHERE id = ?`,
+      `UPDATE accounts SET status = 'offline', status_message = '登录环境已重置', check_info_json = NULL, last_checked_at = NULL, last_online_at = NULL, session_expires_at = NULL, updated_at = ? WHERE id = ?`,
       [now, id],
     );
     return this.get(id);
@@ -146,8 +161,13 @@ export class AccountsRepository {
     return this.db.run("DELETE FROM accounts WHERE id = ?", [id]).changes > 0;
   }
 
-  /** Used by backup restore; keeps the stored partition. */
+  /** Restore domestic metadata only; always derive the isolated partition locally. */
   upsertRaw(account: Account): void {
+    if (!isCnPlatformId(account.platformId)) throw new Error("账号分区仅支持国内平台");
+    const existing = this.get(account.id);
+    if (existing && existing.platformId !== account.platformId)
+      throw new Error("备份账号与现有账号的平台不一致");
+    if (!existing && this.count() >= MAX_ACCOUNTS) throw new Error(`最多支持 ${MAX_ACCOUNTS} 个账号`);
     this.db.run(
       `INSERT INTO accounts (id, platform_id, display_name, handle, avatar_url, external_id, partition, status, status_message,
          last_online_at, last_checked_at, session_expires_at, sort_order, note, created_at, updated_at)
@@ -174,5 +194,22 @@ export class AccountsRepository {
         account.updatedAt,
       ],
     );
+  }
+}
+
+function readCheckInfo(value?: string | null): AccountCheckInfo | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as AccountCheckInfo;
+    if (
+      !parsed ||
+      !["checking", "confirmed", "unconfirmed", "network_error", "paused"].includes(parsed.state) ||
+      typeof parsed.reason !== "string" ||
+      typeof parsed.attemptedAt !== "string"
+    )
+      return null;
+    return parsed;
+  } catch {
+    return null;
   }
 }

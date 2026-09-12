@@ -22,6 +22,38 @@ import {
 
 const BASE = "https://creator.douyin.com";
 
+/** Prefer the platform's existing static image variant; never rewrite a signed CDN URL. */
+export function firstDouyinCoverUrl(value: unknown): string | null {
+  const preferred = (item: unknown, depth = 0): string | null => {
+    if (depth > 8) return null;
+    if (typeof item === "string") {
+      const candidate = firstUrl(item);
+      if (!candidate) return null;
+      try {
+        const url = new URL(candidate);
+        if (!["http:", "https:"].includes(url.protocol)) return null;
+        const format = url.searchParams.get("format") ?? url.searchParams.get("fm");
+        const supported =
+          format === null ? /\.(?:png|jpe?g)$/i.test(url.pathname) : /^(?:png|jpe?g)$/i.test(format);
+        return supported ? candidate : null;
+      } catch {
+        return null;
+      }
+    }
+    if (Array.isArray(item)) {
+      for (const candidate of item) {
+        const found = preferred(candidate, depth + 1);
+        if (found) return found;
+      }
+    } else if (item && typeof item === "object") {
+      const record = item as Record<string, unknown>;
+      return preferred(record.url_list ?? record.url ?? record.uri ?? record.src ?? null, depth + 1);
+    }
+    return null;
+  };
+  return preferred(value) ?? firstUrl(value);
+}
+
 function loggedOut(json: any): boolean {
   const code = pick(json, "status_code");
   return code === 8 || code === 2190004 || code === 2190008;
@@ -84,7 +116,7 @@ async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work
         remoteId,
         {
           title: String(firstDefined(item, ["desc", "title", "caption"]) ?? "").slice(0, 200),
-          coverUrl: firstUrl(
+          coverUrl: firstDouyinCoverUrl(
             firstDefined(item, ["video.cover", "video.origin_cover", "cover", "video.dynamic_cover"]),
           ),
           url: `https://www.douyin.com/video/${remoteId}`,

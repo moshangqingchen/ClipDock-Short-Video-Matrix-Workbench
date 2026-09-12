@@ -1,0 +1,46 @@
+.queue {
+  margin: 0 0 24px;
+  padding: 18px;
+}
+.head {
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  align-items: center;
+}
+.head h3 {
+  margin: 0;
+}
+.head span,
+.queue p,
+.queue small {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.queue ul {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  max-height: 320px;
+  overflow: auto;
+}
+.queue li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+.queue li div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+.queue li span {
+  font-size: 12px;
+}
+.queue small {
+  flex-basis: 100%;
+}

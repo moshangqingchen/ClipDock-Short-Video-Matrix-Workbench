@@ -1,16 +1,24 @@
+import { GlobalMetricsPage } from "@renderer/features/global/GlobalMetricsPage";
+import { GlobalAccountModalHost } from "@renderer/features/global/GlobalAccountModalHost";
+import { useGlobalAccounts, subscribeGlobalAccounts } from "@renderer/store/global-accounts";
 import { useEffect } from "react";
 import { ToastStack, cx } from "@renderer/components/ui";
 import { api } from "@renderer/lib/api";
 import { subscribeToMain, useAccounts, useSettings, useToasts, useUi } from "@renderer/store";
 import { NavRail } from "@renderer/features/layout/NavRail";
 import { AccountSidebar } from "@renderer/features/layout/AccountSidebar";
+import { GlobalAccountSidebar } from "@renderer/features/layout/GlobalAccountSidebar";
 import { AccountWorkspace } from "@renderer/features/browser/AccountWorkspace";
 import { OverviewPage } from "@renderer/features/dashboard/OverviewPage";
 import { MetricsPage } from "@renderer/features/metrics/MetricsPage";
 import { AssetsPage } from "@renderer/features/assets/AssetsPage";
 import { PublishPage } from "@renderer/features/publish/PublishPage";
 import { SettingsPage } from "@renderer/features/settings/SettingsPage";
+import { GlobalAccountsPage } from "@renderer/features/global/GlobalAccountsPage";
+import { CreatorPlatformPage } from "@renderer/features/creator/CreatorPlatformPage";
 import { AddAccountModal } from "@renderer/features/accounts/AddAccountModal";
+import { NetworkStatus } from "@renderer/features/network/NetworkStatus";
+import { startNetworkSubscription } from "@renderer/store/network";
 import layout from "@renderer/features/layout/layout.module.css";
 
 function useTheme() {
@@ -31,8 +39,15 @@ function useBootstrap() {
   const loadAccounts = useAccounts((s) => s.load);
   const loadSettings = useSettings((s) => s.load);
   useEffect(() => {
+    let cancelled = false;
+    let navigated = false;
+    const markNavigation = useUi.subscribe((state, previous) => {
+      if (state.route !== previous.route || state.creatorMode !== previous.creatorMode) navigated = true;
+    });
     const off = subscribeToMain();
-    void Promise.all([loadSettings(), loadAccounts()]).then(() => {
+    const offGlobal = subscribeGlobalAccounts();
+    void Promise.all([loadSettings(), loadAccounts(), useGlobalAccounts.getState().load()]).then(() => {
+      if (cancelled || navigated) return;
       const { settings } = useSettings.getState();
       const { accounts } = useAccounts.getState();
       const remembered =
@@ -40,40 +55,67 @@ function useBootstrap() {
           ? settings.lastActiveAccountId
           : null;
       const route = settings.lastRoute as ReturnType<typeof useUi.getState>["route"] | null;
+      const creatorMode = settings.accountScope ?? (route === "global" ? "global" : "domestic");
+      const globalAccounts = useGlobalAccounts.getState().accounts;
       useUi.setState({
         activeAccountId: remembered ?? accounts[0]?.id ?? null,
+        creatorMode,
+        activeGlobalAccountId: globalAccounts.some((a) => a.id === settings.lastGlobalAccountId)
+          ? settings.lastGlobalAccountId!
+          : (globalAccounts[0]?.id ?? null),
         route:
-          route && ["overview", "workspace", "metrics", "assets", "publish", "settings"].includes(route)
-            ? route
+          route &&
+          ["overview", "creator", "workspace", "global", "metrics", "assets", "publish", "settings"].includes(
+            route,
+          )
+            ? route === "workspace" || route === "global"
+              ? "creator"
+              : route
             : "overview",
       });
+    }).catch(() => {
+      // The account sidebar exposes the failed load and retains any existing list.
     });
-    return off;
+    return () => {
+      cancelled = true;
+      markNavigation();
+      off();
+      offGlobal();
+    };
   }, [loadAccounts, loadSettings]);
 }
 
 function usePersistLocation() {
   const route = useUi((s) => s.route);
+  const creatorMode = useUi((s) => s.creatorMode);
   const activeAccountId = useUi((s) => s.activeAccountId);
+  const activeGlobalAccountId = useUi((s) => s.activeGlobalAccountId);
   const loaded = useSettings((s) => s.loaded);
   useEffect(() => {
     if (!loaded) return;
     const timer = window.setTimeout(
       () =>
         void api.settings
-          .set({ lastRoute: route, lastActiveAccountId: activeAccountId })
+          .set({
+            lastRoute: route === "creator" && creatorMode === "global" ? "global" : route,
+            lastActiveAccountId: activeAccountId,
+            lastGlobalAccountId: activeGlobalAccountId,
+            accountScope: creatorMode,
+          })
           .catch(() => undefined),
       400,
     );
     return () => window.clearTimeout(timer);
-  }, [route, activeAccountId, loaded]);
+  }, [route, creatorMode, activeAccountId, activeGlobalAccountId, loaded]);
 }
 
 function useHideViewsOffWorkspace() {
   const route = useUi((s) => s.route);
+  const creatorMode = useUi((s) => s.creatorMode);
   useEffect(() => {
-    if (route !== "workspace") void api.views.hideAll().catch(() => undefined);
-  }, [route]);
+    if (route !== "workspace" && !(route === "creator" && creatorMode === "domestic"))
+      void api.views.hideAll().catch(() => undefined);
+  }, [route, creatorMode]);
 }
 
 function useShortcuts() {
@@ -84,20 +126,31 @@ function useShortcuts() {
       const { accounts } = useAccounts.getState();
       const ui = useUi.getState();
       if (/^[1-9]$/.test(event.key)) {
+        if (ui.creatorMode === "global") {
+          const account = useGlobalAccounts.getState().accounts[Number(event.key) - 1];
+          if (account) {
+            event.preventDefault();
+            ui.selectGlobalAccount(account.id);
+          }
+          return;
+        }
         const account = accounts[Number(event.key) - 1];
         if (account) {
           event.preventDefault();
-          ui.openAccount(account.id);
+          ui.selectAccount(account.id);
         }
       } else if (event.key.toLowerCase() === "b") {
         event.preventDefault();
         ui.toggleRail();
       } else if (event.key.toLowerCase() === "n") {
         event.preventDefault();
-        ui.setAddAccountOpen(true);
-      } else if (event.key.toLowerCase() === "d" && ui.route === "workspace") {
+        if (ui.creatorMode === "global")
+          window.dispatchEvent(new CustomEvent("clipdock:focus-global-create"));
+        else ui.setAddAccountOpen(true);
+      } else if (event.key.toLowerCase() === "d" && (ui.route === "workspace" || ui.route === "creator")) {
         event.preventDefault();
-        ui.toggleDrawer();
+        if (ui.creatorMode === "global") ui.setRoute("metrics");
+        else ui.toggleDrawer();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -106,6 +159,7 @@ function useShortcuts() {
 }
 
 export default function App() {
+  useEffect(() => startNetworkSubscription(), []);
   useTheme();
   useBootstrap();
   usePersistLocation();
@@ -115,6 +169,7 @@ export default function App() {
   const route = useUi((s) => s.route);
   const railCollapsed = useUi((s) => s.railCollapsed);
   const sidebarHidden = useUi((s) => s.sidebarHidden);
+  const creatorMode = useUi((s) => s.creatorMode);
   const toasts = useToasts((s) => s.items);
   const dismiss = useToasts((s) => s.dismiss);
 
@@ -127,16 +182,26 @@ export default function App() {
       )}
     >
       <NavRail />
-      <AccountSidebar />
+      {creatorMode === "global" ? <GlobalAccountSidebar /> : <AccountSidebar />}
       <main className={layout.main}>
-        {route === "overview" ? <OverviewPage /> : null}
+        <NetworkStatus />
+        {route === "overview" ? (
+          creatorMode === "global" ? (
+            <GlobalMetricsPage overview />
+          ) : (
+            <OverviewPage />
+          )
+        ) : null}
         {route === "workspace" ? <AccountWorkspace /> : null}
-        {route === "metrics" ? <MetricsPage /> : null}
+        {route === "global" ? <GlobalAccountsPage /> : null}
+        {route === "creator" ? <CreatorPlatformPage /> : null}
+        {route === "metrics" ? creatorMode === "global" ? <GlobalMetricsPage /> : <MetricsPage /> : null}
         {route === "assets" ? <AssetsPage /> : null}
         {route === "publish" ? <PublishPage /> : null}
         {route === "settings" ? <SettingsPage /> : null}
       </main>
       <AddAccountModal />
+      <GlobalAccountModalHost />
       <ToastStack items={toasts} onDismiss={dismiss} />
     </div>
   );

@@ -1,10 +1,18 @@
 import fs from "node:fs";
+import { acquireDebugger } from "@main/browser/debugger-lease";
 import type { WebContents } from "electron";
 import type { PublishRecord, PublishRecordInput } from "@shared/types";
 import type { Store } from "@main/db";
 import type { ViewPool } from "@main/browser/view-pool";
 import type { AccountService } from "@main/services/account-service";
 import type { AssetService } from "./asset-service";
+import { getPlatform } from "@shared/platforms";
+import {
+  assertBusinessNetwork,
+  beginBusinessOperation,
+  isNetworkDormantError,
+  type BusinessOperation,
+} from "@main/network/business-access";
 
 export interface PublishServiceOptions {
   store: Store;
@@ -42,11 +50,16 @@ export class PublishService {
   }
 
   async openUpload(accountId: string): Promise<void> {
+    const account = this.options.accounts.get(accountId);
+    this.options.accounts.prepareNetworkOperation(accountId, "view-upload");
+    assertBusinessNetwork(accountId, getPlatform(account.platformId).routes.upload);
     await this.options.accounts.go(accountId, "upload");
   }
 
   async attachFiles(accountId: string, assetIds: string[]): Promise<{ attached: number; message?: string }> {
     const account = this.options.accounts.get(accountId);
+    this.options.accounts.prepareNetworkOperation(accountId, "view-upload");
+    assertBusinessNetwork(accountId, getPlatform(account.platformId).routes.upload);
     const files = assetIds
       .map((id) => this.options.assets.get(id))
       .filter((asset): asset is NonNullable<typeof asset> => Boolean(asset))
@@ -56,28 +69,36 @@ export class PublishService {
 
     const wc = this.options.pool.getWebContents(accountId);
     if (!wc) return { attached: 0, message: "请先打开该账号的上传页面" };
-    void account;
-    return attachThroughDevtools(wc, files);
+    const operation = beginBusinessOperation(accountId, wc.getURL());
+    try {
+      return await attachThroughDevtools(wc, files, operation);
+    } finally {
+      operation.release();
+    }
   }
 }
 
 async function attachThroughDevtools(
   wc: WebContents,
   files: string[],
+  operation: BusinessOperation,
 ): Promise<{ attached: number; message?: string }> {
   const dbg = wc.debugger;
-  const attachedHere = !dbg.isAttached();
+  let release: (() => void) | undefined;
   try {
-    if (attachedHere) dbg.attach("1.3");
+    operation.assertCurrent();
+    release = acquireDebugger(wc);
     const { root } = (await dbg.sendCommand("DOM.getDocument", { depth: -1, pierce: true })) as {
       root: { nodeId: number };
     };
+    operation.assertCurrent();
     const { nodeIds } = (await dbg.sendCommand("DOM.querySelectorAll", {
       nodeId: root.nodeId,
       selector: "input[type=file]",
     })) as {
       nodeIds: number[];
     };
+    operation.assertCurrent();
     if (!nodeIds || nodeIds.length === 0) {
       return { attached: 0, message: "当前页面没有文件上传控件,请先进入上传页" };
     }
@@ -87,24 +108,23 @@ async function attachThroughDevtools(
       const { attributes } = (await dbg.sendCommand("DOM.getAttributes", { nodeId })) as {
         attributes: string[];
       };
+      operation.assertCurrent();
       const accept = attributeValue(attributes, "accept") ?? "";
       if (/video|mp4|\*/.test(accept) && files.some((f) => /\.(mp4|mov|m4v|webm|mkv|avi)$/i.test(f))) {
         target = nodeId;
         break;
       }
     }
+    operation.assertCurrent();
     await dbg.sendCommand("DOM.setFileInputFiles", { nodeId: target, files });
+    operation.assertCurrent();
     return { attached: files.length };
   } catch (error) {
-    return { attached: 0, message: error instanceof Error ? error.message : String(error) };
+    operation.assertCurrent();
+    if (isNetworkDormantError(error)) throw error;
+    return { attached: 0, message: "未能附加文件，请检查上传页面后手动重试" };
   } finally {
-    if (attachedHere) {
-      try {
-        dbg.detach();
-      } catch {
-        // ignore
-      }
-    }
+    try { release?.(); } catch { /* Native window may have closed. */ }
   }
 }
 

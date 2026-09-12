@@ -18,6 +18,7 @@ import {
   Badge,
   Button,
   Card,
+  Cover,
   Delta,
   EmptyState,
   IconButton,
@@ -34,6 +35,8 @@ import { api } from "@renderer/lib/api";
 import { useToasts } from "@renderer/store";
 import dash from "@renderer/features/dashboard/dashboard.module.css";
 import styles from "./observe.module.css";
+import { showCollectAccepted } from "@renderer/features/metrics/collect-feedback";
+import { WorkLink } from "@renderer/features/metrics/WorkLink";
 
 type Range = 7 | 30 | 90;
 
@@ -88,8 +91,7 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
   const collectNow = async () => {
     setCollecting(true);
     try {
-      await api.metrics.collectNow(account.id);
-      await load();
+      showCollectAccepted(await api.metrics.collectNow(account.id));
     } catch (error) {
       useToasts.getState().push({ kind: "error", title: "采集失败", message: (error as Error).message });
     } finally {
@@ -303,13 +305,9 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
             ) : (
               <div className={styles.workList}>
                 {topWorks.map((work, index) => (
-                  <div key={work.id} className={styles.workRow}>
+                  <WorkLink key={work.id} work={work} account={account} className={styles.workRow}>
                     <span className={styles.rank}>{index + 1}</span>
-                    {work.coverUrl ? (
-                      <img className={styles.cover} src={work.coverUrl} alt="" referrerPolicy="no-referrer" />
-                    ) : (
-                      <div className={styles.cover} />
-                    )}
+                    <Cover className={styles.cover} src={work.coverUrl} />
                     <div className={styles.workMeta}>
                       <strong title={work.title}>{work.title || "(无标题)"}</strong>
                       <span>
@@ -320,7 +318,7 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
                         <em>{formatDateTime(work.publishedAt)}</em>
                       </span>
                     </div>
-                  </div>
+                  </WorkLink>
                 ))}
               </div>
             )}

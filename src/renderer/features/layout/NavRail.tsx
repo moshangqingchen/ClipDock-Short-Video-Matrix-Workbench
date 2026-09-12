@@ -15,7 +15,7 @@ import styles from "./layout.module.css";
 
 const ITEMS: Array<{ route: Route; label: string; icon: typeof LayoutDashboard }> = [
   { route: "overview", label: "总览", icon: LayoutDashboard },
-  { route: "workspace", label: "账号", icon: Users },
+  { route: "creator", label: "短视频创作者平台", icon: Users },
   { route: "metrics", label: "数据观测", icon: BarChart3 },
   { route: "assets", label: "素材库", icon: FolderOpen },
   { route: "publish", label: "发布助手", icon: Send },
@@ -55,13 +55,19 @@ export function NavRail() {
           <button
             key={item.route}
             type="button"
-            className={cx(styles.navItem, route === item.route && styles.active)}
+            className={cx(
+              styles.navItem,
+              (route === item.route ||
+                (item.route === "creator" && (route === "workspace" || route === "global"))) &&
+                styles.active,
+            )}
             onClick={() => setRoute(item.route)}
-            title={collapsed ? item.label : undefined}
+            title={item.label}
+            aria-label={item.label}
           >
             <item.icon size={18} strokeWidth={2} />
             <span>{item.label}</span>
-            {item.route === "workspace" && attention > 0 ? (
+            {item.route === "creator" && attention > 0 ? (
               <span className={styles.navCount}>{attention}</span>
             ) : null}
           </button>
@@ -73,7 +79,8 @@ export function NavRail() {
           type="button"
           className={cx(styles.navItem, route === "settings" && styles.active)}
           onClick={() => setRoute("settings")}
-          title={collapsed ? "设置" : undefined}
+          title="设置"
+          aria-label="设置"
         >
           <Settings size={18} strokeWidth={2} />
           <span>设置</span>

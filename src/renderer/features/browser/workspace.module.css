@@ -50,6 +50,7 @@
   display: flex;
   align-items: center;
   gap: 2px;
+  min-width: 0;
 }
 .address {
   flex: 1;
@@ -92,6 +93,9 @@
   padding: 3px;
   border-radius: var(--r-md);
   background: var(--bg-sunken);
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 .quickLink {
   height: 28px;
@@ -133,6 +137,19 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 0 0 auto;
+}
+
+@media (max-width: 1180px) {
+  .identity {
+    max-width: 210px;
+  }
+  .quickLink {
+    padding-inline: 7px;
+  }
+  .quickLink span {
+    display: none;
+  }
 }
 
 /* ---------------- host ---------------- */
@@ -322,4 +339,30 @@
   gap: 8px;
   font-size: var(--text-xs);
   color: var(--fg-muted);
+}
+
+.topbar {
+  display: grid;
+  grid-template-columns: 32px minmax(120px, 180px) auto minmax(80px, 1fr);
+  grid-template-rows: 52px 44px;
+  gap: 0 8px;
+  padding: 0 12px;
+}
+.quickLinks {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  padding: 0 164px 0 0;
+  height: 44px;
+  border-radius: 0;
+  background: transparent;
+  border-top: 1px solid var(--line);
+  overflow: visible;
+}
+.topbarActions {
+  grid-column: 4;
+  grid-row: 2;
+  justify-self: end;
+}
+.address {
+  min-width: 0;
 }

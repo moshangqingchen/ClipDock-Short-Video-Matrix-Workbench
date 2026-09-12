@@ -1,0 +1,47 @@
+.control {
+  position: relative;
+  min-width: 0;
+  margin: 2px 4px 0 -6px;
+}
+
+.select {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 4px 27px 4px 5px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--text-lg);
+  font-weight: 650;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.select:hover {
+  background: var(--bg);
+  border-color: var(--line);
+}
+
+.select:focus-visible {
+  outline: 2px solid var(--brand-400);
+  outline-offset: 1px;
+}
+
+.select option {
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-size: var(--text-md);
+}
+
+.chevron {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  color: var(--fg-muted);
+  pointer-events: none;
+}

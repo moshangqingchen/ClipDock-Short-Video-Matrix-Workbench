@@ -1,7 +1,17 @@
-import { forwardRef, useEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useLayoutEffect,
+  useId,
+  useRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import { AlertTriangle, CheckCircle2, Info, X, XCircle, type LucideIcon } from "lucide-react";
 import type { AccountStatus } from "@shared/types";
+import { useUi } from "@renderer/store";
 import styles from "./ui.module.css";
 
 export function cx(...parts: Array<string | false | null | undefined>): string {
@@ -134,6 +144,41 @@ export const STATUS_TONE: Record<AccountStatus, "success" | "warning" | "danger"
 
 /* ---------------- Avatar ---------------- */
 
+/** Keyed by src at the call site: a new cache reference gets a fresh loading attempt. */
+function MediaImage({
+  src,
+  className,
+  fallback,
+}: {
+  src?: string | null;
+  className?: string;
+  fallback: ReactNode;
+}) {
+  const [failed, setFailed] = useState(false);
+  return src && !failed ? (
+    <img
+      className={className}
+      src={src}
+      alt=""
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(true)}
+    />
+  ) : (
+    fallback
+  );
+}
+
+export function Cover({ src, className }: { src?: string | null; className?: string }) {
+  return (
+    <MediaImage
+      key={src ?? ""}
+      src={src}
+      className={className}
+      fallback={<div className={className} role="img" aria-label="暂无封面" />}
+    />
+  );
+}
+
 export function Avatar({
   src,
   name,
@@ -149,22 +194,17 @@ export function Avatar({
   color: string;
   size?: number;
   round?: boolean;
-  badge?: string;
+  badge?: React.ReactNode;
   badgeColor?: string;
   className?: string;
 }) {
-  const [failed, setFailed] = useState(false);
   const initial = name.trim().charAt(0).toUpperCase() || "?";
   return (
     <span
       className={cx(styles.avatar, round && styles.round, className)}
       style={{ width: size, height: size, background: color, fontSize: Math.round(size * 0.38) }}
     >
-      {src && !failed ? (
-        <img src={src} alt="" referrerPolicy="no-referrer" onError={() => setFailed(true)} />
-      ) : (
-        initial
-      )}
+      <MediaImage key={src ?? ""} src={src} fallback={initial} />
       {badge ? (
         <span className={styles.avatarBadge} style={{ background: badgeColor ?? "#111" }}>
           {badge}
@@ -292,19 +332,69 @@ export function Modal({
   wide?: boolean;
   icon?: ReactNode;
 }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const close = useRef(onClose);
+  useLayoutEffect(() => {
+    close.current = onClose;
+  }, [onClose]);
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const previous = document.activeElement as HTMLElement | null;
+    useUi.getState().pushOverlay();
+    const focusable = () =>
+      Array.from(
+        ref.current?.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]',
+        ) ?? [],
+      );
+    (
+      ref.current?.querySelector<HTMLElement>("[autofocus], input, textarea") ??
+      focusable()[0] ??
+      ref.current
+    )?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close.current();
+      }
+      if (e.key === "Tab") {
+        const items = focusable();
+        const first = items[0],
+          last = items.at(-1);
+        if (!first) {
+          e.preventDefault();
+          ref.current?.focus();
+        } else if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last?.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      useUi.getState().popOverlay();
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [open]);
   if (!open) return null;
   return createPortal(
     <div className={styles.backdrop} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={cx(styles.modal, wide && styles.wide)} role="dialog" aria-modal="true">
+      <div
+        ref={ref}
+        tabIndex={-1}
+        className={cx(styles.modal, wide && styles.wide)}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
         <div className={styles.modalHead}>
           {icon}
-          <h3>{title}</h3>
+          <h3 id={titleId}>{title}</h3>
           <IconButton icon={X} label="关闭" onClick={onClose} />
         </div>
         <div className={styles.modalBody}>{children}</div>
@@ -327,25 +417,76 @@ export function Menu({
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const close = useRef(onClose);
+  useLayoutEffect(() => {
+    close.current = onClose;
+  }, [onClose]);
+  useLayoutEffect(() => {
+    if (!anchor || !ref.current) return;
+    const place = () => {
+      const menu = ref.current;
+      if (!menu) return;
+      menu.style.maxHeight = `${Math.max(80, window.innerHeight - 16)}px`;
+      const { width, height } = menu.getBoundingClientRect();
+      const top =
+        anchor.bottom + 6 + height <= window.innerHeight - 8 ? anchor.bottom + 6 : anchor.top - height - 6;
+      menu.style.top = `${Math.max(8, Math.min(top, window.innerHeight - height - 8))}px`;
+      menu.style.left = `${Math.max(8, Math.min(anchor.left, window.innerWidth - width - 8))}px`;
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(ref.current);
+    window.addEventListener("resize", place);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", place);
+    };
+  }, [anchor]);
   useEffect(() => {
     if (!anchor) return;
+    const previous = document.activeElement as HTMLElement | null;
+    useUi.getState().pushOverlay();
+    const items = () =>
+      Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? []);
+    items()[0]?.focus();
     const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+      if (!ref.current?.contains(e.target as Node)) close.current();
     };
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" || e.key === "Tab") {
+        e.preventDefault();
+        close.current();
+        return;
+      }
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+      e.preventDefault();
+      const buttons = items(),
+        index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const next =
+        e.key === "Home"
+          ? 0
+          : e.key === "End"
+            ? buttons.length - 1
+            : (index + (e.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+    };
     window.addEventListener("mousedown", onDown);
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey);
+      useUi.getState().popOverlay();
+      if (previous?.isConnected) previous.focus();
     };
-  }, [anchor, onClose]);
+  }, [anchor]);
   if (!anchor) return null;
-  const maxLeft = window.innerWidth - 200;
-  const top = anchor.bottom + 6;
-  const left = Math.min(anchor.left, maxLeft);
   return createPortal(
-    <div ref={ref} className={styles.menu} style={{ position: "fixed", top, left }}>
+    <div
+      ref={ref}
+      role="menu"
+      className={styles.menu}
+      style={{ position: "fixed", top: 8, left: 8, overflowY: "auto", maxWidth: "calc(100vw - 16px)" }}
+    >
       {children}
     </div>,
     document.body,
@@ -359,7 +500,7 @@ export function MenuItem({
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { icon?: LucideIcon; danger?: boolean }) {
   return (
-    <button type="button" className={cx(styles.menuItem, danger && styles.danger)} {...rest}>
+    <button type="button" role="menuitem" className={cx(styles.menuItem, danger && styles.danger)} {...rest}>
       {Icon ? <Icon size={15} /> : null}
       {children}
     </button>

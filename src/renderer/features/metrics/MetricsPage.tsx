@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { PlatformLogo } from "@renderer/components/ui/PlatformLogo";
 import {
   Area,
   AreaChart,
@@ -18,6 +19,7 @@ import {
   Badge,
   Button,
   Card,
+  Cover,
   Delta,
   EmptyState,
   STATUS_LABEL,
@@ -36,6 +38,8 @@ import { api } from "@renderer/lib/api";
 import { useAccounts, useToasts, useUi } from "@renderer/store";
 import layout from "@renderer/features/layout/layout.module.css";
 import styles from "./metrics.module.css";
+import { showCollectAccepted } from "./collect-feedback";
+import { WorkLink } from "./WorkLink";
 
 type SortKey = "followers" | "likes" | "plays" | "comments" | "works" | "dayFollowers";
 type Range = 7 | 30 | 90;
@@ -44,7 +48,8 @@ export function MetricsPage() {
   const accounts = useAccounts((s) => s.accounts);
   const platformId = useUi((s) => s.metricsPlatform);
   const setPlatform = useUi((s) => s.setMetricsPlatform);
-  const [detailId, setDetailId] = useState<string | null>(null);
+  const detailId = useUi((s) => s.metricsAccountId),
+    setDetailId = useUi((s) => s.setMetricsAccountId);
   const [range, setRange] = useState<Range>(30);
 
   const available = PLATFORM_LIST.filter((p) => accounts.some((a) => a.platformId === p.id));
@@ -55,7 +60,7 @@ export function MetricsPage() {
     if (selected !== platformId) setPlatform(selected);
   }, [selected, platformId, setPlatform]);
 
-  if (detailId)
+  if (detailId && accounts.some((account) => account.id === detailId))
     return (
       <AccountDetail accountId={detailId} range={range} onBack={() => setDetailId(null)} onRange={setRange} />
     );
@@ -96,7 +101,7 @@ export function MetricsPage() {
                   className={cx(styles.platformTab, selected === p.id && styles.active)}
                   onClick={() => setPlatform(p.id)}
                 >
-                  <i style={{ background: p.color }}>{p.glyph}</i>
+                  <PlatformLogo platformId={p.id} size={20} />
                   {p.name}
                   <b>{accounts.filter((a) => a.platformId === p.id).length}</b>
                 </button>
@@ -156,8 +161,10 @@ function PlatformTable({
   const collectPlatform = async () => {
     setCollecting(true);
     try {
-      for (const row of data?.accounts ?? []) await api.metrics.collectNow(row.accountId);
-      setData(await api.metrics.platform(platformId, range));
+      const batches = await Promise.all(
+        (data?.accounts ?? []).map((row) => api.metrics.collectNow(row.accountId)),
+      );
+      showCollectAccepted(batches.flat());
     } catch (error) {
       useToasts.getState().push({ kind: "error", title: "采集失败", message: (error as Error).message });
     } finally {
@@ -418,7 +425,9 @@ function AccountDetail({
   const collect = async () => {
     setCollecting(true);
     try {
-      await api.metrics.collectNow(accountId);
+      showCollectAccepted(await api.metrics.collectNow(accountId));
+    } catch (error) {
+      useToasts.getState().push({ kind: "error", title: "任务受理失败", message: (error as Error).message });
     } finally {
       setCollecting(false);
     }
@@ -436,7 +445,7 @@ function AccountDetail({
           color={platform.color}
           size={52}
           round
-          badge={platform.glyph}
+          badge={<PlatformLogo platformId={platform.id} size={16} />}
           badgeColor={platform.color}
         />
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -601,12 +610,8 @@ function AccountDetail({
         ) : (
           <div className={styles.worksGrid}>
             {topWorks.map((work) => (
-              <div key={work.id} className={styles.workCard}>
-                {work.coverUrl ? (
-                  <img src={work.coverUrl} alt="" referrerPolicy="no-referrer" />
-                ) : (
-                  <div className={styles.noCover} />
-                )}
+              <WorkLink key={work.id} work={work} account={account} className={styles.workCard}>
+                <Cover className={styles.noCover} src={work.coverUrl} />
                 <div style={{ minWidth: 0 }}>
                   <strong title={work.title}>{work.title || "(无标题)"}</strong>
                   <div className={styles.stats}>
@@ -617,7 +622,7 @@ function AccountDetail({
                     <span>{formatDateTime(work.publishedAt)}</span>
                   </div>
                 </div>
-              </div>
+              </WorkLink>
             ))}
           </div>
         )}

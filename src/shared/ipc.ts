@@ -1,7 +1,18 @@
+import type { GlobalWorkspaceApi } from "./global-workspace";
 import { z } from "zod";
-import { PLATFORM_IDS, type PlatformId } from "./platforms";
+import { CN_PLATFORM_IDS } from "./platforms";
+import type { NetworkApi, NetworkSnapshot } from "./network";
+import type { CredentialApi } from "./credentials";
+import type { GlobalAccountApi } from "./global-accounts";
+import type { GlobalAppsApi } from "./global-apps";
+import type { GlobalOAuthApi } from "./global-oauth";
+import type { GlobalReadApi } from "./global-read";
+import type { GlobalJobsApi } from "./global-jobs";
+import type { GlobalUploadsApi } from "./global-uploads";
+import type { GlobalWebApi } from "./global-web";
+import type { CollectJob } from "./collect-jobs";
 import type {
-  Account,
+  AccountDto,
   AccountMetricsView,
   AppSettings,
   Asset,
@@ -9,12 +20,13 @@ import type {
   BackupMetadata,
   CollectRun,
   MetricName,
-  OverviewView,
-  PlatformSummaryView,
+  OverviewDto,
+  PlatformSummaryDto,
+  MediaProjectionMode,
   PublishRecord,
   ViewBounds,
   ViewState,
-  Work,
+  WorkDto,
 } from "./types";
 import { METRIC_NAMES } from "./types";
 
@@ -24,7 +36,8 @@ export { IPC, type IpcChannel } from "./ipc-channels";
 /* Schemas                                                             */
 /* ------------------------------------------------------------------ */
 
-export const platformIdSchema = z.enum(PLATFORM_IDS as unknown as [PlatformId, ...PlatformId[]]);
+export const cnPlatformIdSchema = z.enum(CN_PLATFORM_IDS);
+export const platformIdSchema = cnPlatformIdSchema;
 export const accountIdSchema = z.string().uuid();
 export const metricNameSchema = z.enum(METRIC_NAMES as unknown as [MetricName, ...MetricName[]]);
 
@@ -36,7 +49,7 @@ export const boundsSchema = z.object({
 });
 
 export const accountCreateSchema = z.object({
-  platformId: platformIdSchema,
+  platformId: cnPlatformIdSchema,
   displayName: z.string().trim().min(1).max(60).optional(),
   note: z.string().trim().max(500).optional(),
 });
@@ -44,7 +57,8 @@ export const accountCreateSchema = z.object({
 export const accountUpdateSchema = z.object({
   displayName: z.string().trim().min(1).max(60).optional(),
   handle: z.string().trim().max(80).nullable().optional(),
-  avatarUrl: z.string().url().max(2000).nullable().optional(),
+  // Collector-only media input. Public updates cannot nominate URLs or another account's cache ID.
+  avatarUrl: z.never().optional(),
   externalId: z.string().trim().max(120).nullable().optional(),
   note: z.string().trim().max(500).nullable().optional(),
   sortOrder: z.number().int().min(0).max(10_000).optional(),
@@ -74,6 +88,8 @@ export const settingsPatchSchema = z.object({
   notifyOnExpiring: z.boolean().optional(),
   sidebarCollapsed: z.boolean().optional(),
   lastActiveAccountId: z.string().uuid().nullable().optional(),
+  lastGlobalAccountId: z.string().uuid().nullable().optional(),
+  accountScope: z.enum(["domestic", "global"]).optional(),
   lastRoute: z.string().max(200).nullable().optional(),
 });
 
@@ -111,18 +127,28 @@ export interface BackupImportResult {
 }
 
 export interface WorkbenchApi {
+  globalWorkspace: GlobalWorkspaceApi;
+  globalAccounts: GlobalAccountApi;
+  globalApps: GlobalAppsApi;
+  globalOAuth: GlobalOAuthApi;
+  globalRead: GlobalReadApi;
+  globalJobs: GlobalJobsApi;
+  globalUploads: GlobalUploadsApi;
+  globalWeb: GlobalWebApi;
+  network: NetworkApi;
+  credentials: CredentialApi;
   accounts: {
-    list(): Promise<Account[]>;
-    create(input: z.input<typeof accountCreateSchema>): Promise<Account>;
-    update(id: string, patch: z.input<typeof accountUpdateSchema>): Promise<Account>;
+    list(): Promise<AccountDto<MediaProjectionMode>[]>;
+    create(input: z.input<typeof accountCreateSchema>): Promise<AccountDto<MediaProjectionMode>>;
+    update(id: string, patch: z.input<typeof accountUpdateSchema>): Promise<AccountDto<MediaProjectionMode>>;
     delete(id: string): Promise<void>;
     reorder(ids: string[]): Promise<void>;
-    resetEnvironment(id: string): Promise<Account>;
-    checkStatus(id: string): Promise<Account>;
-    refreshProfile(id: string): Promise<Account>;
+    resetEnvironment(id: string): Promise<AccountDto<MediaProjectionMode>>;
+    checkStatus(id: string): Promise<AccountDto<MediaProjectionMode>>;
+    refreshProfile(id: string): Promise<AccountDto<MediaProjectionMode>>;
   };
   views: {
-    show(id: string, bounds: ViewBounds): Promise<ViewState>;
+    show(id: string, bounds: ViewBounds, enterHomepage?: boolean): Promise<ViewState>;
     hide(id: string): Promise<void>;
     hideAll(): Promise<void>;
     setBounds(id: string, bounds: ViewBounds): Promise<void>;
@@ -138,13 +164,15 @@ export interface WorkbenchApi {
   };
   metrics: {
     account(id: string, days?: number): Promise<AccountMetricsView>;
-    platform(platformId: string, days?: number): Promise<PlatformSummaryView>;
-    overview(days?: number): Promise<OverviewView>;
-    collectNow(id?: string): Promise<CollectRun[]>;
+    platform(platformId: string, days?: number): Promise<PlatformSummaryDto<MediaProjectionMode>>;
+    overview(days?: number): Promise<OverviewDto<MediaProjectionMode>>;
+    collectNow(id?: string): Promise<CollectJob[]>;
+    jobs(id?: string): Promise<CollectJob[]>;
+    cancelJob(id: string): Promise<CollectJob | null>;
     runs(id: string, limit?: number): Promise<CollectRun[]>;
   };
   works: {
-    list(id: string, limit?: number): Promise<Work[]>;
+    list(id: string, limit?: number): Promise<WorkDto<MediaProjectionMode>[]>;
   };
   assets: {
     list(): Promise<Asset[]>;
@@ -175,12 +203,14 @@ export interface WorkbenchApi {
     info(): Promise<AppInfo>;
     openExternal(url: string): Promise<void>;
   };
-  on(event: "account-changed", handler: (account: Account) => void): () => void;
+  on(event: "account-changed", handler: (account: AccountDto<MediaProjectionMode>) => void): () => void;
   on(event: "accounts-reloaded", handler: () => void): () => void;
   on(event: "view-state", handler: (state: ViewState) => void): () => void;
   on(event: "metrics-updated", handler: (payload: { accountId: string }) => void): () => void;
   on(event: "collect-run", handler: (run: CollectRun) => void): () => void;
+  on(event: "collect-job", handler: (job: CollectJob) => void): () => void;
   on(event: "toast", handler: (toast: ToastEvent) => void): () => void;
+  on(event: "network-state", handler: (snapshot: NetworkSnapshot) => void): () => void;
 }
 
 declare global {

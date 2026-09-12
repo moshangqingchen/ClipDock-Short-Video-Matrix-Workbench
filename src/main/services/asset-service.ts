@@ -167,11 +167,29 @@ export class AssetService {
     return null;
   }
 
-  /** Serve `sv-asset://file/<id>` and `sv-asset://thumb/<id>` to the shell. */
-  registerProtocol(): void {
-    protocol.handle(ASSET_SCHEME, (request) => {
+  /** One local-only dispatcher; a remote-cache miss never triggers a network fetch. */
+  registerProtocol(remoteMedia?: { responseFor(cacheId: string): Promise<Response> }): void {
+    protocol.handle(ASSET_SCHEME, async (request) => {
       try {
         const url = new URL(request.url);
+        if (url.username || url.password || url.port || url.search || url.hash)
+          return new Response("bad request", { status: 400 });
+        if (request.method !== "GET" && request.method !== "HEAD")
+          return new Response("method not allowed", { status: 405 });
+        if (url.hostname === "remote") {
+          if (
+            !remoteMedia ||
+            !/^\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(url.pathname)
+          )
+            return new Response("not found", { status: 404 });
+          const response = await remoteMedia.responseFor(url.pathname.slice(1));
+          return request.method === "HEAD"
+            ? new Response(null, { status: response.status, headers: response.headers })
+            : response;
+        }
+        if (url.hostname !== "file" && url.hostname !== "thumb")
+          return new Response("not found", { status: 404 });
+        if (!/^\/[^/]+$/.test(url.pathname)) return new Response("not found", { status: 404 });
         const [, id] = url.pathname.split("/");
         const asset = id ? this.store.assets.get(id) : undefined;
         if (!asset) return new Response("not found", { status: 404 });

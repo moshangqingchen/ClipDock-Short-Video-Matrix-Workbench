@@ -56,7 +56,7 @@
 }
 .brandText span {
   display: block;
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: 0.14em;
   color: var(--rail-fg);
   opacity: 0.7;
@@ -112,7 +112,7 @@
   border-radius: 10px;
   display: grid;
   place-items: center;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
   background: var(--danger);
   color: #fff;
@@ -199,13 +199,14 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  height: 34px;
+  height: 52px;
   padding: 0 6px;
   border-radius: var(--r-sm);
-  color: var(--fg-muted);
-  font-size: var(--text-xs);
+  color: var(--fg);
+  font-size: 15px;
   font-weight: 700;
   text-align: left;
+  background: var(--bg-hover);
 }
 .groupHead:hover {
   background: var(--bg-hover);
@@ -223,7 +224,7 @@
   display: grid;
   place-items: center;
   color: #fff;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 .groupName {
@@ -234,10 +235,49 @@
   font-variant-numeric: tabular-nums;
 }
 .groupAdd {
-  opacity: 0;
+  opacity: 0.65;
 }
 .groupHead:hover .groupAdd {
   opacity: 1;
+}
+.groupHead:focus-within .groupAdd {
+  opacity: 1;
+}
+.groupToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.groupChildren {
+  margin-left: 28px;
+  border-left: 1px solid var(--line);
+  padding-left: 5px;
+}
+.groupChildren:empty {
+  display: none;
+}
+.accountOpen {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 25px 0 7px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  text-align: left;
+  color: inherit;
 }
 .accountRow {
   position: relative;
@@ -245,8 +285,8 @@
   align-items: center;
   gap: 10px;
   width: 100%;
-  height: 52px;
-  padding: 0 8px 0 8px;
+  height: 40px;
+  padding: 0;
   margin: 2px 0;
   border-radius: var(--r-md);
   text-align: left;
@@ -269,10 +309,20 @@
 .accountMeta strong {
   display: block;
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: 500;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+.accountName {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.accountName > strong {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 .accountMeta span {
   display: flex;
@@ -284,8 +334,28 @@
   white-space: nowrap;
   overflow: hidden;
 }
+.globalStatusDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--fg-subtle);
+}
+.globalStatusDot[data-phase="open"] {
+  background: var(--success);
+}
+.globalStatusDot[data-phase="checking"],
+.globalStatusDot[data-phase="opening"],
+.globalStatusDot[data-phase="closing"] {
+  background: var(--warning);
+}
+.globalStatusDot[data-phase="dormant"],
+.globalStatusDot[data-phase="error"] {
+  background: var(--danger);
+}
 .accountMore {
-  opacity: 0;
+  opacity: 0.5;
   position: absolute;
   right: 6px;
 }
@@ -297,7 +367,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--brand-600);
   font-weight: 700;
 }
@@ -346,8 +416,34 @@
 .eyebrow {
   display: block;
   margin-bottom: 4px;
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.14em;
   color: var(--fg-subtle);
+}
+
+@media (max-width: 1279px) {
+  .shell,
+  .shell.railCollapsed {
+    grid-template-columns: 64px var(--sidebar-w) minmax(0, 1fr);
+  }
+  .shell.sidebarHidden,
+  .shell.railCollapsed.sidebarHidden {
+    grid-template-columns: 64px 0 minmax(0, 1fr);
+  }
+  .rail {
+    padding-inline: 8px;
+  }
+  .rail .brand {
+    justify-content: center;
+    padding: 0;
+  }
+  .rail .brandText,
+  .rail .navItem > span {
+    display: none;
+  }
+  .rail .navItem {
+    justify-content: center;
+    padding: 0;
+  }
 }

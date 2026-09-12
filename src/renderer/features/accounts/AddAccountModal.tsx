@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { PlatformLogo } from "@renderer/components/ui/PlatformLogo";
 import { Check, Fingerprint, QrCode, ShieldCheck } from "lucide-react";
 import { PLATFORM_LIST, type PlatformId } from "@shared/platforms";
 import { Button, Field, Modal, TextInput, cx } from "@renderer/components/ui";
@@ -17,16 +18,9 @@ export function AddAccountModal() {
 function AddAccountForm({ initialPlatform }: { initialPlatform: PlatformId }) {
   const setOpen = useUi((s) => s.setAddAccountOpen);
   const openAccount = useUi((s) => s.openAccount);
-  const pushOverlay = useUi((s) => s.pushOverlay);
-  const popOverlay = useUi((s) => s.popOverlay);
   const [platformId, setPlatformId] = useState<PlatformId>(initialPlatform);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    pushOverlay();
-    return () => popOverlay();
-  }, [pushOverlay, popOverlay]);
 
   const platform = PLATFORM_LIST.find((p) => p.id === platformId)!;
 
@@ -77,9 +71,7 @@ function AddAccountForm({ initialPlatform }: { initialPlatform: PlatformId }) {
               className={cx(styles.platformCard, p.id === platformId && styles.selected)}
               onClick={() => setPlatformId(p.id)}
             >
-              <span className={styles.platformGlyph} style={{ background: p.color }}>
-                {p.glyph}
-              </span>
+              <PlatformLogo platformId={p.id} size={32} />
               <span className={styles.platformName}>{p.name}</span>
               <span className={styles.platformMethods}>
                 {p.loginMethods.map((m) => ({ qr: "扫码", sms: "短信", password: "密码" })[m]).join(" / ")}

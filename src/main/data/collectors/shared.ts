@@ -1,11 +1,20 @@
 import type { WebContents } from "electron";
+import { randomUUID } from "node:crypto";
 import type { Account, MetricName, MetricSnapshot, Work } from "@shared/types";
 import type { PlatformId } from "@shared/platforms";
 import type { ProfileInfo } from "@main/services/account-service";
+import { evaluateWithLease } from "@main/network/page-evaluation";
+import {
+  accountForWebContents,
+  beginBusinessOperation,
+  BusinessTaskCancelledError,
+  isNetworkDormantError,
+} from "@main/network/business-access";
 
 export interface CollectorContext {
   webContents: WebContents;
   account: Account;
+  identityProfile?: CollectorProfile | null;
 }
 
 export interface CollectorProfile extends ProfileInfo {
@@ -69,8 +78,35 @@ export async function pageFetch(
   init: { method?: string; headers?: Record<string, string>; body?: string } = {},
 ): Promise<PageResponse> {
   if (wc.isDestroyed()) throw new Error("view-destroyed");
-  const script = `
+  const accountId = accountForWebContents(wc);
+  const targetUrl = new URL(url, wc.getURL()).href;
+  const operation = beginBusinessOperation(accountId, targetUrl);
+  const requestId = randomUUID();
+  const cancel = () => {
+    if (wc.isDestroyed()) return;
+    void wc
+      .executeJavaScript(
+        `(() => {
+      const key = Symbol.for("clipdock.collect.aborts");
+      const pending = globalThis[key] || (globalThis[key] = new Map());
+      const id = ${JSON.stringify(requestId)};
+      const controller = pending.get(id);
+      if (controller) controller.abort(); else pending.set(id, null);
+    })()`,
+      )
+      .catch(() => undefined);
+  };
+  operation.signal.addEventListener("abort", cancel, { once: true });
+  try {
+    operation.assertCurrent();
+    const script = `
     (async () => {
+      const key = Symbol.for("clipdock.collect.aborts");
+      const pending = globalThis[key] || (globalThis[key] = new Map());
+      const id = ${JSON.stringify(requestId)};
+      const controller = new AbortController();
+      if (pending.has(id) && pending.get(id) === null) controller.abort();
+      pending.set(id, controller);
       try {
         const response = await fetch(${JSON.stringify(url)}, {
           method: ${JSON.stringify(init.method ?? "GET")},
@@ -78,17 +114,26 @@ export async function pageFetch(
           body: ${init.body === undefined ? "undefined" : JSON.stringify(init.body)},
           credentials: "include",
           cache: "no-store",
+          signal: controller.signal,
         });
         const text = await response.text();
         return { ok: response.ok, status: response.status, text: text.slice(0, 2_000_000), url: response.url };
       } catch (error) {
         return { ok: false, status: 0, text: String(error && error.message || error), url: ${JSON.stringify(url)} };
-      }
+      } finally { pending.delete(id); }
     })()
   `;
-  const result = (await wc.executeJavaScript(script, true)) as PageResponse;
-  if (result.status === 429) throw new RateLimitedError();
-  return result;
+    const result = await evaluateWithLease<PageResponse>(wc, script, operation);
+    operation.assertCurrent();
+    if (result.status === 429) throw new RateLimitedError();
+    return result;
+  } catch (error) {
+    operation.assertCurrent();
+    throw error;
+  } finally {
+    operation.signal.removeEventListener("abort", cancel);
+    operation.release();
+  }
 }
 
 export async function pageJson<T = unknown>(
@@ -121,7 +166,13 @@ export async function firstJson<T = any>(
       if (status === 401) throw new LoggedOutError();
       if (json && accept(json)) return json as T;
     } catch (error) {
-      if (error instanceof RateLimitedError || error instanceof LoggedOutError) throw error;
+      if (
+        error instanceof RateLimitedError ||
+        error instanceof LoggedOutError ||
+        error instanceof BusinessTaskCancelledError ||
+        isNetworkDormantError(error)
+      )
+        throw error;
     }
   }
   return null;
@@ -210,6 +261,7 @@ export async function domScrapeNumbers(
   labels: Record<MetricName, string[]>,
 ): Promise<Partial<Record<MetricName, number>>> {
   if (wc.isDestroyed()) return {};
+  const operation = beginBusinessOperation(accountForWebContents(wc));
   const script = `
     (() => {
       const labels = ${JSON.stringify(labels)};
@@ -234,15 +286,20 @@ export async function domScrapeNumbers(
     })()
   `;
   try {
-    const raw = (await wc.executeJavaScript(script, true)) as Record<string, string>;
+    const raw = await evaluateWithLease<Record<string, string>>(wc, script, operation);
+    operation.assertCurrent();
     const parsed: Partial<Record<MetricName, number>> = {};
     for (const [metric, text] of Object.entries(raw)) {
       const n = toNumber(text);
       if (n != null) parsed[metric as MetricName] = n;
     }
     return parsed;
-  } catch {
+  } catch (error) {
+    operation.assertCurrent();
+    if (isNetworkDormantError(error) || error instanceof BusinessTaskCancelledError) throw error;
     return {};
+  } finally {
+    operation.release();
   }
 }
 

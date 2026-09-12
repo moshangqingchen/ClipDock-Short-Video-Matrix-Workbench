@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PlatformLogo } from "@renderer/components/ui/PlatformLogo";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
   ArrowRight,
@@ -29,6 +30,8 @@ import { api } from "@renderer/lib/api";
 import { useAccounts, useToasts, useUi } from "@renderer/store";
 import layout from "@renderer/features/layout/layout.module.css";
 import styles from "./dashboard.module.css";
+import { CollectQueue } from "@renderer/features/metrics/CollectQueue";
+import { showCollectAccepted } from "@renderer/features/metrics/collect-feedback";
 
 export function OverviewPage() {
   const [data, setData] = useState<OverviewView | null>(null);
@@ -59,12 +62,7 @@ export function OverviewPage() {
   const collectAll = async () => {
     setCollecting(true);
     try {
-      const runs = await api.metrics.collectNow();
-      const ok = runs.filter((r) => r.status === "success" || r.status === "partial").length;
-      useToasts
-        .getState()
-        .push({ kind: "success", title: "采集完成", message: `${ok}/${runs.length} 个账号已更新` });
-      setData(await api.metrics.overview(30));
+      showCollectAccepted(await api.metrics.collectNow());
     } catch (error) {
       useToasts.getState().push({ kind: "error", title: "采集失败", message: (error as Error).message });
     } finally {
@@ -93,6 +91,7 @@ export function OverviewPage() {
         </div>
       </div>
 
+      <CollectQueue />
       <h3 className={styles.rowTitle}>全部数据</h3>
       <div className={cx(styles.kpiRow, styles.kpiRow5)}>
         <Kpi
@@ -344,9 +343,7 @@ export function OverviewPage() {
               className={styles.platformCard}
             >
               <div className={styles.platformTop}>
-                <span className={styles.platformGlyph} style={{ background: def.color }}>
-                  {def.glyph}
-                </span>
+                <PlatformLogo platformId={def.id} size={32} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <strong>{def.name}</strong>
                   <span>

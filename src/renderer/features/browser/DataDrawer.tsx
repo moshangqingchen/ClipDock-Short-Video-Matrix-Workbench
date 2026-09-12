@@ -4,6 +4,7 @@ import { Eye, Heart, MessageCircle, RefreshCw, Users, X } from "lucide-react";
 import type { Account, AccountMetricsView, Work } from "@shared/types";
 import {
   Button,
+  Cover,
   Delta,
   EmptyState,
   IconButton,
@@ -15,6 +16,8 @@ import {
 import { api } from "@renderer/lib/api";
 import { useToasts } from "@renderer/store";
 import styles from "./workspace.module.css";
+import { showCollectAccepted } from "@renderer/features/metrics/collect-feedback";
+import { WorkLink } from "@renderer/features/metrics/WorkLink";
 
 export function DataDrawer({ account, onClose }: { account: Account; onClose: () => void }) {
   const [view, setView] = useState<AccountMetricsView | null>(null);
@@ -43,8 +46,7 @@ export function DataDrawer({ account, onClose }: { account: Account; onClose: ()
   const collectNow = async () => {
     setCollecting(true);
     try {
-      await api.metrics.collectNow(account.id);
-      await load();
+      showCollectAccepted(await api.metrics.collectNow(account.id));
     } catch (error) {
       useToasts.getState().push({ kind: "error", title: "采集失败", message: (error as Error).message });
     } finally {
@@ -150,17 +152,8 @@ export function DataDrawer({ account, onClose }: { account: Account; onClose: ()
           ) : (
             <div className={styles.workList}>
               {works.map((work) => (
-                <div key={work.id} className={styles.workItem}>
-                  {work.coverUrl ? (
-                    <img
-                      className={styles.workCover}
-                      src={work.coverUrl}
-                      alt=""
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <div className={styles.workCover} />
-                  )}
+                <WorkLink key={work.id} work={work} account={account} className={styles.workItem}>
+                  <Cover className={styles.workCover} src={work.coverUrl} />
                   <div className={styles.workMeta}>
                     <strong title={work.title}>{work.title || "(无标题)"}</strong>
                     <span>
@@ -170,7 +163,7 @@ export function DataDrawer({ account, onClose }: { account: Account; onClose: ()
                       <span>{work.publishedAt ? formatDateTime(work.publishedAt) : ""}</span>
                     </span>
                   </div>
-                </div>
+                </WorkLink>
               ))}
             </div>
           )}

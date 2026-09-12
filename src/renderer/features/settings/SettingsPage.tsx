@@ -7,6 +7,8 @@ import { api, hasBridge } from "@renderer/lib/api";
 import { useAccounts, useSettings, useToasts } from "@renderer/store";
 import layout from "@renderer/features/layout/layout.module.css";
 import styles from "./settings.module.css";
+import { NetworkPanel } from "@renderer/features/network/NetworkPanel";
+import { GlobalAppsPanel } from "@renderer/features/global/GlobalAppsPanel";
 
 export function SettingsPage() {
   const settings = useSettings((s) => s.settings);
@@ -40,6 +42,8 @@ export function SettingsPage() {
       </div>
 
       <div className={styles.sections}>
+        <NetworkPanel />
+        <GlobalAppsPanel />
         <Card>
           <div className={styles.sectionHead}>
             <h3>外观</h3>
@@ -270,7 +274,7 @@ function BackupModal({ mode, onClose }: { mode: "export" | "import"; onClose: ()
           useToasts.getState().push({
             kind: "success",
             title: "备份已导出",
-            message: `${meta.accountCount} 个账号${meta.encrypted ? " · 已加密" : ""}`,
+            message: `${meta.accountCount + (meta.globalAccountCount ?? 0)} 个账号${meta.encrypted ? " · 已加密" : ""}`,
           });
       } else {
         const result = await api.backup.import({

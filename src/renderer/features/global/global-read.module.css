@@ -1,0 +1,140 @@
+.panel {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+.header h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+}
+.panel p {
+  color: var(--fg-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.header p {
+  margin: 0;
+}
+.actions {
+  display: flex;
+  gap: 8px;
+}
+.uploadActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+}
+.uploadActions > :first-child {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.uploadActions select {
+  width: 100%;
+  min-width: 0;
+}
+.uploadMetadata {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr));
+  gap: 12px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 0;
+}
+.uploadMetadata > p {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.uploadNotify {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+.capabilities,
+.metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px 32px;
+}
+.capabilities dt,
+.metrics dt {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.capabilities dd,
+.metrics dd {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+.metrics dd {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.profile {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+  overflow-wrap: anywhere;
+}
+.profile span {
+  color: var(--fg-muted);
+}
+.message {
+  color: var(--danger);
+}
+.job {
+  margin: 12px 0;
+  padding: 2px 12px;
+  border-left: 3px solid var(--border);
+}
+.tableWrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.tableWrap table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 13px;
+}
+.tableWrap caption {
+  text-align: left;
+  padding: 8px 0;
+  color: var(--fg-muted);
+}
+.tableWrap th,
+.tableWrap td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.tableWrap th {
+  font-weight: 500;
+  color: var(--fg-muted);
+}
+.tableWrap td:first-child {
+  min-width: 140px;
+  max-width: 400px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 720px) {
+  .header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .capabilities,
+  .metrics {
+    gap: 16px 24px;
+  }
+}

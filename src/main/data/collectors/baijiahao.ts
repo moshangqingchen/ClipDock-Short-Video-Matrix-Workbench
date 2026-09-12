@@ -131,6 +131,11 @@ export const baijiahaoCollector: Collector = {
         profile = {
           ...(profile ?? {}),
           followers: profile?.followers ?? scraped.followers ?? null,
+          following: profile?.following ?? scraped.following ?? null,
+          likes: profile?.likes ?? scraped.likes ?? null,
+          comments: profile?.comments ?? scraped.comments ?? null,
+          shares: profile?.shares ?? scraped.shares ?? null,
+          favorites: profile?.favorites ?? scraped.favorites ?? null,
           plays: profile?.plays ?? scraped.plays ?? null,
           works: profile?.works ?? scraped.works ?? null,
         };

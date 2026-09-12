@@ -46,6 +46,7 @@ export function useAssets() {
 
 export function AssetsPage() {
   const { assets, reload } = useAssets();
+  const selected = useUi((s) => s.selectedAssetIds);
   const [importing, setImporting] = useState(false);
   const setRoute = useUi((s) => s.setRoute);
 
@@ -80,7 +81,19 @@ export function AssetsPage() {
           </Button>
         </div>
       </div>
-      <AssetGrid assets={assets} onChanged={reload} />
+      <AssetGrid
+        assets={assets}
+        onChanged={reload}
+        selectable
+        selected={selected}
+        onToggle={(id) =>
+          useUi
+            .getState()
+            .selectAssets(
+              selected.includes(id) ? selected.filter((value) => value !== id) : [...selected, id],
+            )
+        }
+      />
     </div>
   );
 }

@@ -6,6 +6,7 @@ export type NavigationDecision =
   { action: "allow"; url: string } | { action: "external"; url: string } | { action: "deny"; reason: string };
 
 export interface NavigationPolicyOptions {
+  allowNetwork?: () => boolean;
   onExternal?: (url: string) => void;
   onDenied?: (url: string, reason: string) => void;
 }
@@ -86,6 +87,10 @@ export function installNavigationPolicy(
   options: NavigationPolicyOptions = {},
 ): () => void {
   const handleTopLevel = (event: { preventDefault(): void }, url: string) => {
+    if (options.allowNetwork && !options.allowNetwork()) {
+      event.preventDefault();
+      return;
+    }
     const decision = decideTopLevelNavigation(platformId, url);
     if (decision.action === "allow") {
       if (decision.url !== url) {
@@ -118,6 +123,7 @@ export function installNavigationPolicy(
   // windows) are navigated in-place so the same partition handles them;
   // anything else goes to the system browser.
   contents.setWindowOpenHandler(({ url }) => {
+    if (options.allowNetwork && !options.allowNetwork()) return { action: "deny" };
     const decision = decideTopLevelNavigation(platformId, url);
     if (decision.action === "allow" && decision.url !== "about:blank") {
       void contents.loadURL(decision.url).catch(() => undefined);

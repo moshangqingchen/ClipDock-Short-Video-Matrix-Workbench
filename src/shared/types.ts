@@ -1,3 +1,6 @@
+import type { GlobalAccount } from "./global-accounts";
+import type { WebObservation } from "./global-web-observation";
+import type { GlobalWork, GlobalPublishRecord } from "./global-workspace";
 import type { PlatformId } from "./platforms";
 
 export type { PlatformId };
@@ -26,6 +29,8 @@ export interface Account {
   partition: string;
   status: AccountStatus;
   statusMessage?: string | null;
+  /** Outcome of the last attempt, independent of the last confirmed login conclusion. */
+  checkInfo?: AccountCheckInfo | null;
   lastOnlineAt?: string | null;
   lastCheckedAt?: string | null;
   /** Estimated time at which the session will expire (from TTL heuristics). */
@@ -34,6 +39,12 @@ export interface Account {
   note?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AccountCheckInfo {
+  state: "checking" | "confirmed" | "unconfirmed" | "network_error" | "paused";
+  reason: string;
+  attemptedAt: string;
 }
 
 export interface AccountCreateInput {
@@ -54,6 +65,10 @@ export interface AccountUpdateInput {
 /** Per-account browser view runtime state, mirrored to the renderer. */
 export interface ViewState {
   accountId: string;
+  lifecycle?: "loading" | "ready" | "sleeping" | "crashed" | "destroyed";
+  revision?: number;
+  instanceId?: number;
+  navigationId?: number;
   attached: boolean;
   visible: boolean;
   url: string;
@@ -184,6 +199,28 @@ export interface OverviewView {
   }>;
 }
 
+/** Internal collector records retain source URLs; strict renderer projections contain cache IDs only. */
+export type LocalMediaUrl = `sv-asset://remote/${string}`;
+export type MediaProjectionMode = "strict" | "observe";
+type ProjectedMediaField<Key extends string, Mode extends MediaProjectionMode> = Mode extends "strict"
+  ? { [Field in Key]: LocalMediaUrl | null }
+  : { [Field in Key]?: string | null };
+export type AccountDto<Mode extends MediaProjectionMode = "strict"> = Omit<Account, "avatarUrl"> &
+  ProjectedMediaField<"avatarUrl", Mode>;
+export type WorkDto<Mode extends MediaProjectionMode = "strict"> = Omit<Work, "coverUrl"> &
+  ProjectedMediaField<"coverUrl", Mode>;
+export type PlatformSummaryDto<Mode extends MediaProjectionMode = "strict"> = Omit<
+  PlatformSummaryView,
+  "accounts"
+> & {
+  accounts: Array<
+    Omit<PlatformSummaryView["accounts"][number], "avatarUrl"> & ProjectedMediaField<"avatarUrl", Mode>
+  >;
+};
+export type OverviewDto<Mode extends MediaProjectionMode = "strict"> = Omit<OverviewView, "platforms"> & {
+  platforms: PlatformSummaryDto<Mode>[];
+};
+
 export type AssetKind = "video" | "image" | "audio" | "other";
 
 export interface Asset {
@@ -241,6 +278,8 @@ export interface AppSettings {
   notifyOnExpiring: boolean;
   sidebarCollapsed: boolean;
   lastActiveAccountId?: string | null;
+  lastGlobalAccountId?: string | null;
+  accountScope?: "domestic" | "global";
   lastRoute?: string | null;
 }
 
@@ -259,6 +298,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export interface BackupMetadata {
+  globalAccountCount?: number;
   format: "sv-workbench-backup";
   version: number;
   createdAt: string;
@@ -276,6 +316,17 @@ export interface BackupPayload {
   assets: Asset[];
   publishRecords: PublishRecord[];
   settings: Partial<AppSettings>;
+  global?: {
+    accounts: Array<
+      Pick<
+        GlobalAccount,
+        "id" | "platformId" | "displayName" | "note" | "browserEngine" | "createdAt" | "updatedAt"
+      >
+    >;
+    observations: WebObservation[];
+    works: GlobalWork[];
+    publishRecords: GlobalPublishRecord[];
+  };
 }
 
 export interface AuditEvent {

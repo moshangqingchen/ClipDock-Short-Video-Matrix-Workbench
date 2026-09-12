@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Bug, ExternalLink, Pencil, RefreshCcw, ShieldAlert, Trash2, UserRoundCheck } from "lucide-react";
 import type { Account } from "@shared/types";
 import { getPlatform } from "@shared/platforms";
@@ -16,13 +16,6 @@ export function AccountMenu({
   onClose: () => void;
 }) {
   const [mode, setMode] = useState<"menu" | "rename" | "reset" | "delete">("menu");
-  const pushOverlay = useUi((s) => s.pushOverlay);
-  const popOverlay = useUi((s) => s.popOverlay);
-
-  useEffect(() => {
-    pushOverlay();
-    return () => popOverlay();
-  }, [pushOverlay, popOverlay]);
 
   if (mode === "rename") return <RenameModal account={account} onClose={onClose} />;
   if (mode === "reset") return <ResetModal account={account} onClose={onClose} />;
@@ -40,7 +33,6 @@ export function AccountMenu({
           try {
             const updated = await api.accounts.checkStatus(account.id);
             useAccounts.getState().upsert(updated);
-            await api.accounts.refreshProfile(account.id);
           } catch (error) {
             useToasts
               .getState()

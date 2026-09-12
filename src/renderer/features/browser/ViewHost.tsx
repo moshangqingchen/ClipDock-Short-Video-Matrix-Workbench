@@ -2,6 +2,11 @@ import { useEffect, useRef } from "react";
 import type { ViewBounds } from "@shared/types";
 import { api } from "@renderer/lib/api";
 import { useUi } from "@renderer/store";
+import { useNetwork } from "@renderer/store/network";
+
+// Native views paint above the renderer. Finish a cancelled show (including
+// its hide) before another host can show, even when an IPC reply arrives late.
+let showTransition: Promise<void> = Promise.resolve();
 
 function measure(el: HTMLElement): ViewBounds | null {
   const rect = el.getBoundingClientRect();
@@ -17,13 +22,21 @@ function measure(el: HTMLElement): ViewBounds | null {
 
 /**
  * The native account view is positioned over this element. It never owns the
- * page: show/hide/bounds are the only three operations, so switching accounts
- * or opening a modal costs nothing and never reloads the platform page.
+ * page: a new workspace entry requests the platform homepage once. Restoring
+ * the same workspace after a modal or network pause keeps its current page.
  */
-export function ViewHost({ accountId, onError }: { accountId: string; onError?: (message: string) => void }) {
+export function ViewHost({ accountId, initialUrl, onError }: {
+  accountId: string;
+  initialUrl?: string | null;
+  onError?: (message: string) => void;
+}) {
   const ref = useRef<HTMLDivElement>(null);
+  const enteredAccount = useRef<string | null>(null);
   const overlayCount = useUi((s) => s.overlayCount);
   const hidden = overlayCount > 0;
+  const networkReady = useNetwork(
+    (s) => s.snapshot.accounts.find((a) => a.accountId === accountId)?.state === "allowed",
+  );
 
   useEffect(() => {
     const el = ref.current;
@@ -44,7 +57,30 @@ export function ViewHost({ accountId, onError }: { accountId: string; onError?: 
 
     const initial = measure(el) ?? { x: 0, y: 0, width: 1, height: 1 };
     lastKey = `${initial.x},${initial.y},${initial.width},${initial.height}`;
-    void api.views.show(accountId, initial).catch((error: Error) => onError?.(error.message));
+    showTransition = showTransition
+      .then(async () => {
+        if (cancelled) return;
+        try {
+          const newEntry = enteredAccount.current !== accountId;
+          const enterHomepage = newEntry && !initialUrl;
+          // Claim the foreground before a work load, so background collectors
+          // cannot borrow this account view and redirect it to management.
+          await api.views.show(accountId, measure(el) ?? initial, enterHomepage);
+          if (newEntry && initialUrl) {
+            if (cancelled) return;
+            await api.views.navigate(accountId, initialUrl);
+          }
+          // A completed entry counts even if a modal hid the host while the IPC
+          // was pending. A failed work navigation remains pending for retry.
+          enteredAccount.current = accountId;
+          if (!cancelled) onError?.("");
+        } catch (error) {
+          if (!cancelled) onError?.(error instanceof Error ? error.message : String(error));
+        } finally {
+          if (cancelled) await api.views.hide(accountId).catch(() => undefined);
+        }
+      })
+      .catch(() => undefined);
 
     const observer = new ResizeObserver(() => {
       if (frame !== undefined) cancelAnimationFrame(frame);
@@ -57,16 +93,18 @@ export function ViewHost({ accountId, onError }: { accountId: string; onError?: 
     // Layout transitions (rail collapse, drawer) animate for ~320ms; keep
     // polling briefly so the native view tracks the pane edge smoothly.
     const interval = window.setInterval(() => sync(), 120);
-    window.addEventListener("resize", () => sync());
+    const resize = () => sync();
+    window.addEventListener("resize", resize);
 
     return () => {
       cancelled = true;
       if (frame !== undefined) cancelAnimationFrame(frame);
       observer.disconnect();
       window.clearInterval(interval);
+      window.removeEventListener("resize", resize);
       void api.views.hide(accountId).catch(() => undefined);
     };
-  }, [accountId, hidden, onError]);
+  }, [accountId, initialUrl, hidden, onError, networkReady]);
 
   return <div ref={ref} data-view-host={accountId} style={{ position: "absolute", inset: 0 }} />;
 }

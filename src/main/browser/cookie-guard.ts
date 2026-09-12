@@ -42,7 +42,9 @@ export class CookieGuard {
       void this.persist(cookie);
     }
     this.scheduleFlush();
-    this.scheduleNotify();
+    const login = getPlatform(this.platformId).login.sessionCookies;
+    if (this.isLoginDomain(cookie.domain ?? "") &&
+        [...login.required, ...(login.anyOf ?? [])].includes(cookie.name)) this.scheduleNotify();
   };
 
   private isLoginDomain(domain: string): boolean {

@@ -24,6 +24,9 @@ const BASE = "https://cp.kuaishou.com";
 const JSON_HEADERS = { "content-type": "application/json", accept: "application/json" };
 
 async function readProfile(ctx: CollectorContext): Promise<CollectorProfile | null> {
+  // The real page includes its live request/security context. Reuse its
+  // verified projection rather than replaying auth endpoints with an empty body.
+  if (ctx.identityProfile) return ctx.identityProfile;
   const json = await firstJson(
     ctx.webContents,
     [

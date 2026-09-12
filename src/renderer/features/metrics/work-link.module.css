@@ -1,0 +1,13 @@
+.action {
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+.action:not(:disabled):hover {
+  border-color: var(--brand-400);
+  background: var(--bg-sunken);
+}
+.action:focus-visible {
+  outline: 2px solid var(--brand-400);
+  outline-offset: 2px;
+}

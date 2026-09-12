@@ -40,23 +40,10 @@ function assertLoggedIn(json: any): void {
 }
 
 async function readProfile(ctx: CollectorContext): Promise<CollectorProfile | null> {
-  const json = await firstJson(
-    ctx.webContents,
-    [{ url: `${BASE}/auth/auth_data`, init: { method: "POST", headers: HEADERS, body: body() } }],
-    (j) => pick(j, "errCode") !== undefined,
-  );
-  if (!json) return null;
-  assertLoggedIn(json);
-  if (pick(json, "errCode") !== 0) return null;
-  const user = (pick(json, "data.finderUser") ?? pick(json, "data.user") ?? {}) as Record<string, unknown>;
-  return {
-    displayName: (firstDefined(user, ["nickname", "nickName"]) as string) ?? null,
-    avatarUrl: firstUrl(firstDefined(user, ["headImgUrl", "headImg", "avatar"])),
-    handle: (firstDefined(user, ["uniqId", "finderUsername"]) as string) ?? null,
-    externalId: (firstDefined(user, ["finderUsername", "uin"]) as string) ?? null,
-    followers: toNumber(firstDefined(user, ["fansCount", "fans_count", "followerCount"])),
-    works: toNumber(firstDefined(user, ["feedsCount", "feedCount", "postCount"])),
-  };
+  // auth_data needs the page's live security context. A fabricated POST can
+  // return an auth error while the real page is healthy. Reuse only the
+  // identity observer's verified, allowlisted profile projection.
+  return ctx.identityProfile ?? null;
 }
 
 async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work[] | null> {

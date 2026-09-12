@@ -6,19 +6,27 @@
  * deliberately data-only: no Electron, no DOM, no network.
  */
 
-export type PlatformId = "douyin" | "kuaishou" | "xiaohongshu" | "bilibili" | "baijiahao" | "weixin_channels";
-
-export const PLATFORM_IDS: readonly PlatformId[] = [
+export const CN_PLATFORM_IDS = [
   "douyin",
   "kuaishou",
   "xiaohongshu",
   "bilibili",
   "baijiahao",
   "weixin_channels",
-];
+] as const;
+
+export type CnPlatformId = (typeof CN_PLATFORM_IDS)[number];
+
+/** Reserved for the separate official-API account model; never a browser partition. */
+export const GLOBAL_PLATFORM_IDS = ["youtube", "tiktok", "x"] as const;
+export type GlobalPlatformId = (typeof GLOBAL_PLATFORM_IDS)[number];
+
+/** Compatibility aliases deliberately remain domestic-only. */
+export type PlatformId = CnPlatformId;
+export const PLATFORM_IDS: readonly CnPlatformId[] = CN_PLATFORM_IDS;
 
 export interface PlatformRoutes {
-  /** Creator console home ("管理"); also the landing page when a view opens. */
+  /** Creator console home ("管理"); fallback entry for platforms without a public site. */
   home: string;
   /**
    * Consumer-facing site ("主页") for browsing / watching in the same login
@@ -387,7 +395,7 @@ const WEIXIN_CHANNELS: PlatformDefinition = {
       method: "POST",
       loggedOutStatuses: [401, 403],
     },
-    probeFromMain: true,
+    probeFromMain: false,
     loginUsesPopup: false,
   },
 };
@@ -409,8 +417,22 @@ export function getPlatform(id: PlatformId): PlatformDefinition {
   return platform;
 }
 
+/** Foreground account entry opens the public homepage when the platform has one. */
+export function platformEntryUrl(id: PlatformId): string {
+  const { routes } = getPlatform(id);
+  return routes.site ?? routes.home;
+}
+
+export function isCnPlatformId(value: unknown): value is CnPlatformId {
+  return typeof value === "string" && (CN_PLATFORM_IDS as readonly string[]).includes(value);
+}
+
+export function isGlobalPlatformId(value: unknown): value is GlobalPlatformId {
+  return typeof value === "string" && (GLOBAL_PLATFORM_IDS as readonly string[]).includes(value);
+}
+
 export function isPlatformId(value: unknown): value is PlatformId {
-  return typeof value === "string" && (PLATFORM_IDS as readonly string[]).includes(value);
+  return isCnPlatformId(value);
 }
 
 /** Exact host or any subdomain of `base`. */

@@ -2,12 +2,15 @@ import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
+import { reviewedOperationBuildOptions } from "./reviewed-operation-build.mjs";
+import { buildChromeDock } from "./build-chrome-dock.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const production = process.argv.includes("--production");
 const outDir = path.join(root, "dist-electron");
 
 fs.mkdirSync(outDir, { recursive: true });
+buildChromeDock(root, outDir);
 
 const shared = {
   bundle: true,
@@ -28,8 +31,11 @@ const shared = {
 
 // The main process is emitted as ESM (package.json "type": "module"). Electron
 // and Node built-ins stay external so the runtime binaries are used.
+const reviewedOperations = reviewedOperationBuildOptions(root);
 await build({
   ...shared,
+  define: { ...shared.define, ...reviewedOperations.define },
+  plugins: reviewedOperations.plugins,
   entryPoints: [path.join(root, "src/main/index.ts")],
   outfile: path.join(outDir, "main.js"),
   format: "esm",
