@@ -270,6 +270,7 @@ function Workspace({ account }: { account: Account }) {
 
       <div className={styles.hostWrap}>
         {observing ? <ObservePanel account={account} onClose={toggleObserve} /> : null}
+        <div className={styles.pageSurface}>
         {hasBridge ? (
           <ViewHost accountId={account.id} initialUrl={entryUrl} onError={setHostError} />
         ) : (
@@ -286,6 +287,7 @@ function Workspace({ account }: { account: Account }) {
             </div>
           </div>
         )}
+        </div>
         {hasBridge && !view ? (
           <div className={styles.placeholder}>
             <div className={styles.placeholderCard}>
@@ -353,6 +355,8 @@ function Workspace({ account }: { account: Account }) {
 }
 
 function humanizeError(error: string): string {
+  if (/ERR_TUNNEL_CONNECTION_FAILED/i.test(error))
+    return "页面连接未建立，请重新加载；扫码后出现此错误不代表账号登录已失效";
   if (/ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|ERR_CONNECTION/i.test(error))
     return "网络连接失败,请检查网络后重试";
   if (/ERR_TIMED_OUT/i.test(error)) return "页面加载超时";

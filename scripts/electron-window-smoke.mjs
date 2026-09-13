@@ -102,7 +102,7 @@ async function debuggerConnection() {
   return ws;
 }
 
-async function command(method, params) {
+async function command(method, params, sessionId) {
   // One session for the run, with bounded commands; reconnecting for every DOM change
   // leaves screenshot/compositor behavior dependent on repeated debugger detach events.
   const ws = await debuggerConnection();
@@ -114,7 +114,7 @@ async function command(method, params) {
     }, 30_000);
     pendingCommands.set(id, { resolve, reject, timer });
     try {
-      ws.send(JSON.stringify({ id, method, params }));
+      ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     } catch {
       clearTimeout(timer);
       pendingCommands.delete(id);
@@ -888,6 +888,31 @@ async function verifyDomesticOptimization() {
   // by the service concurrency test with a deliberately deferred response.
   const checked = await evaluate(`(async()=>{const a=(await window.workbench.accounts.list()).find(a=>a.platformId==='weixin_channels'); const [one,two]=await Promise.all([window.workbench.accounts.checkStatus(a.id),window.workbench.accounts.checkStatus(a.id)]); return {status:one.status,info:one.checkInfo?.state,same:one.checkInfo?.state===two.checkInfo?.state&&one.status===two.status};})()`);
   if (!checked.same || !['paused','unconfirmed'].includes(checked.info) || checked.status!=='unknown') throw new Error('check feedback altered unconfirmed auth: '+JSON.stringify(checked));
+  await evaluate(`document.querySelector('#platform-weixin_channels button[aria-pressed]').click()`);
+  await sleep(500);
+  const targets = await command('Target.getTargets', {});
+  const accountPage = targets.targetInfos.find(t=>t.url.startsWith('https://channels.weixin.qq.com/'));
+  if (!accountPage) throw new Error('throwaway Channels page missing');
+  const { sessionId } = await command('Target.attachToTarget', {targetId:accountPage.targetId,flatten:true});
+  try {
+    await command('Network.enable', {}, sessionId);
+    await command('Network.emulateNetworkConditions', {offline:true,latency:0,downloadThroughput:-1,uploadThroughput:-1}, sessionId);
+    await evaluate(`(async()=>{const a=(await window.workbench.accounts.list()).find(a=>a.platformId==='weixin_channels');await window.workbench.views.reload(a.id).catch(()=>{});})()`);
+    await sleep(300);
+  const errorLayout = await evaluate(`(() => {
+    const retry=[...document.querySelectorAll('button')].find(b=>b.textContent==='重新加载');
+    const host=document.querySelector('[data-view-host]');
+    if(!retry||!host)return null;
+    const message=retry.parentElement.getBoundingClientRect(), native=host.getBoundingClientRect();
+    return {visible:message.height>0, separated:message.bottom<=native.top, width:native.width,height:native.height};
+  })()`);
+  if (!errorLayout?.visible || !errorLayout.separated || errorLayout.width<100 || errorLayout.height<100)
+    throw new Error('native page overlaps load-error/retry controls: '+JSON.stringify(errorLayout));
+  console.log('load error and retry controls occupy space outside the native page');
+  } finally {
+    await command('Network.emulateNetworkConditions', {offline:false,latency:0,downloadThroughput:-1,uploadThroughput:-1}, sessionId);
+    await command('Target.detachFromTarget', {sessionId});
+  }
   console.log('domestic optimization smoke: 960/1120/1440/1920 px; six packaged logos; 52/40 px hierarchy; search/collapse; IPC check feedback and deduplication');
 }
 

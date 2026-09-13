@@ -509,6 +509,51 @@ describe("ProxyTunnelReader scoped facts", () => {
 });
 
 describe("ProxyTunnelReader cancellation and real work ownership", () => {
+  function delayedDomestic() {
+    const f = fixture({ targetScope: "domestic" });
+    const input = context();
+    input.platformId = "weixin_channels";
+    input.target = { host: "channels.weixin.qq.com", port: 443 };
+    let visible = false;
+    f.json.read.mockImplementation(async (endpoint) => {
+      const rows = rawConnections();
+      rows.connections[0].metadata.host = input.target.host;
+      if (!visible) rows.connections.splice(0, 1);
+      return { ...stamp(), value: endpoint === "/connections" ? rows : rawProxies() };
+    });
+    return { ...f, input, publish: () => { visible = true; } };
+  }
+  it("waits for a domestic CONNECT row published after socket acknowledgement, retaining real sample times", async () => {
+    const f = delayedDomestic();
+    const pending = run(f.reader, f.input);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    f.publish();
+    const result = await pending;
+    expect(result?.connections.value).toMatchObject({ connections: [{ metadata: { host: f.input.target.host } }] });
+    expect(f.json.read.mock.calls.filter(([path]) => path === "/connections").length).toBeGreaterThanOrEqual(2);
+    expect(result!.controllerBefore.completedAtMono).toBeLessThanOrEqual(result!.connections.startedAtMono);
+    expect(result!.controllerAfter.startedAtMono).toBeGreaterThanOrEqual(result!.connections.completedAtMono);
+  });
+  it.each(["abort", "configuration", "timeout"])("stops waiting for a missing domestic row on %s", async (kind) => {
+    const f = delayedDomestic();
+    const abort = new AbortController();
+    const pending = f.reader.readTunnel(f.input, abort.signal);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    if (kind === "abort") abort.abort();
+    if (kind === "configuration") f.setVersion({ generation: 2, revision: "changed" });
+    expect(await pending).toBeNull();
+    await f.reader.whenIdle();
+    const calls = f.json.read.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(f.json.read).toHaveBeenCalledTimes(calls);
+    expect(f.json.read.mock.calls.filter(([path]) => path === "/connections").length).toBeLessThanOrEqual(11);
+  });
+  it("does not retry a malformed domestic connection list", async () => {
+    const f = delayedDomestic();
+    f.json.read.mockResolvedValue({ ...stamp(), value: { connections: null } } as never);
+    expect(await run(f.reader, f.input)).toBeNull();
+    expect(f.json.read.mock.calls.filter(([path]) => path === "/connections")).toHaveLength(1);
+  });
   it("keeps a cancelled public read busy until both real work and dependency drain finish", async () => {
     const f = fixture(),
       work = deferred<ClashReadResult>(),

@@ -155,9 +155,17 @@
 /* ---------------- host ---------------- */
 .hostWrap {
   position: relative;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   background: var(--bg-sunken);
+}
+.pageSurface {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
 }
 .host {
   position: absolute;
@@ -215,10 +223,11 @@
   animation: rise-in var(--dur) var(--ease);
 }
 .errorBar {
-  position: absolute;
-  left: 50%;
-  top: 14px;
-  transform: translateX(-50%);
+  position: relative;
+  order: -1;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  margin: 8px;
   display: flex;
   align-items: center;
   gap: 10px;

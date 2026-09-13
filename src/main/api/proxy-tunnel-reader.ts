@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { request, type ClientRequest, type IncomingMessage } from "node:http";
 import { isIP } from "node:net";
+import { setTimeout as wait } from "node:timers/promises";
 import { ClashReader, type ClashReadResult } from "@main/network/clash-reader";
 import {
   WindowsControllerOwnerReader,
@@ -113,20 +114,23 @@ function ownerAt(
 }
 
 /** Raw controller objects stay main-only; retain all this source tuple's candidates, including conflicts. */
+function sourceConnections(
+  value: unknown,
+  context: VerifiableProxyTunnelContext,
+): unknown[] {
+  const rows = record(value)?.connections;
+  if (!Array.isArray(rows) || rows.length > 20_000) fail();
+  return rows.filter((row) => {
+    const meta = record(record(row)?.metadata);
+    return meta && ip(meta.sourceIP) === ip(context.socket.localAddress) &&
+      port(meta.sourcePort) === context.socket.localPort;
+  });
+}
 function scopeConnections(
   value: unknown,
   context: VerifiableProxyTunnelContext,
 ): { value: unknown; chains: Set<string> } {
-  const rows = record(value)?.connections;
-  if (!Array.isArray(rows) || rows.length > 20_000) fail();
-  const owned = rows.filter((row) => {
-    const meta = record(record(row)?.metadata);
-    return (
-      meta &&
-      ip(meta.sourceIP) === ip(context.socket.localAddress) &&
-      port(meta.sourcePort) === context.socket.localPort
-    );
-  });
+  const owned = sourceConnections(value, context);
   if (!owned.length || owned.length > 8) fail();
   const chains = new Set<string>();
   const connections = owned.map((row) => {
@@ -607,7 +611,7 @@ export class ProxyTunnelReader {
       proxyOwnerWork,
       (this.options.targetScope === "domestic" ? proxyOwnerWork : Promise.resolve()).then(() => {
         job.guard();
-        return this.json.read("/connections", job.controller.signal);
+        return this.readConnections(context, job);
       }),
       Promise.resolve().then(() => {
         job.guard();
@@ -671,5 +675,20 @@ export class ProxyTunnelReader {
       !timed(value as Timed, startedAtMono, performance.now())
     )
       fail();
+  }
+
+  private async readConnections(context: VerifiableProxyTunnelContext, job: Job): Promise<RawResponse> {
+    // The kernel can acknowledge CONNECT before publishing its connection row.
+    // Only absence is transient; malformed or conflicting evidence still fails verification.
+    const deadline = performance.now() + 1000;
+    for (let attempt = 0; ; attempt++) {
+      job.guard();
+      const sample = await this.json.read("/connections", job.controller.signal);
+      job.guard();
+      if (this.options.targetScope !== "domestic" ||
+          sourceConnections(sample.value, context).length || attempt >= 10 || performance.now() >= deadline) return sample;
+      await wait(Math.min(100, Math.max(1, deadline - performance.now())), undefined,
+        { signal: job.controller.signal });
+    }
   }
 }
