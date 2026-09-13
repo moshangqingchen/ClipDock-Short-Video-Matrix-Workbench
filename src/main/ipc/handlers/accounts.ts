@@ -29,7 +29,7 @@ export function registerAccountHandlers(
     accounts.resetEnvironment(id).then(media.projectAccount),
   );
   ipc.handleValidated(IPC.accountCheckStatus, accountIdSchema, (_e, id) =>
-    accounts.checkStatus(id, { force: true }).then(media.projectAccount),
+    accounts.checkStatus(id, { force: true, refreshPage: true }).then(media.projectAccount),
   );
   ipc.handleValidated(IPC.accountRefreshProfile, accountIdSchema, (_e, id) =>
     accounts.refreshProfile(id).then(media.projectAccount),

@@ -275,7 +275,16 @@ export class MetricsRepository {
   /** Last run that actually attempted collection (skips are not attempts). */
   lastAttemptedRun(accountId: string): CollectRun | null {
     const row = this.db.get<RunRow>(
-      "SELECT * FROM collect_runs WHERE account_id = ? AND status <> 'skipped' ORDER BY started_at DESC LIMIT 1",
+      "SELECT * FROM collect_runs WHERE account_id = ? AND status <> 'skipped' AND trigger_kind <> 'keepalive' ORDER BY started_at DESC LIMIT 1",
+      [accountId],
+    );
+    return row ? toRun(row) : null;
+  }
+
+  /** Attempts have their own durable clock; patrol checks must not postpone keepalive. */
+  lastKeepaliveRun(accountId: string): CollectRun | null {
+    const row = this.db.get<RunRow>(
+      "SELECT * FROM collect_runs WHERE account_id = ? AND trigger_kind = 'keepalive' ORDER BY started_at DESC, id DESC LIMIT 1",
       [accountId],
     );
     return row ? toRun(row) : null;

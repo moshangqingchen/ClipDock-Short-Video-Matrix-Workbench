@@ -267,7 +267,7 @@ export class CollectScheduler {
         }
       }
       if (this.settings.keepaliveEnabled) {
-        const attemptedAt = account.checkInfo?.attemptedAt ?? account.lastCheckedAt;
+        const attemptedAt = this.options.store.metrics.lastKeepaliveRun(account.id)?.startedAt ?? account.createdAt;
         const since = attemptedAt ? now - Date.parse(attemptedAt) : Infinity;
         if (since >= this.settings.keepaliveIntervalHours * 3600_000) this.enqueue(account.id, "keepalive");
       }
@@ -352,7 +352,8 @@ export class CollectScheduler {
         return;
       }
       if (job.trigger === "keepalive") {
-        const checked = await withBusinessTaskSignal(signal, () => accounts.checkStatus(account.id));
+        const checked = await withBusinessTaskSignal(signal, () => accounts.checkStatus(account.id,
+          account.platformId === "weixin_channels" ? { force: true, refreshPage: true } : undefined));
         lease.assertCurrent();
         if (this.stopped || active.abort.signal.aborted || store.collectJobs.get(job.id)?.state !== "running")
           return;

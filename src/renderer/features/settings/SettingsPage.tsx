@@ -110,7 +110,7 @@ export function SettingsPage() {
           </Row>
           <Row
             title="会话保活"
-            description="定期在后台静默访问一次创作者首页,续期滑动过期类登录(视频号、小红书受益最大)。"
+            description="定期检查登录状态；视频号会在不打断当前操作时访问管理首页复核，实际登录有效期由平台决定。"
           >
             <Switch checked={settings.keepaliveEnabled} onChange={(v) => set("keepaliveEnabled", v)} />
           </Row>

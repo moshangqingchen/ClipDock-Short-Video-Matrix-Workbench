@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { setTimeout as wait } from "node:timers/promises";
 import type {
   Account,
   AccountCheckInfo,
@@ -24,6 +25,7 @@ import {
   isNetworkDormantError,
   isStrictBusinessNetwork,
   NetworkDormantError,
+  type BusinessOperation,
   prepareBusinessOperation,
 } from "@main/network/business-access";
 import type { DomesticOperation } from "@main/network/operation-catalog";
@@ -57,12 +59,15 @@ const CHECK_DEBOUNCE_MS = 1_200;
 const PROBE_MIN_INTERVAL_MS = 30_000;
 const PATROL_INTERVAL_MS = 5 * 60_000;
 const PATROL_STAGGER_MS = 700;
+const RECOVERY_DELAY_MS = 5_000;
+const RECOVERY_RETRY_MS = 60_000;
 const ATTENTION_STATES: ReadonlySet<AccountStatus> = new Set(["offline", "needs_verification", "expiring"]);
 
 export class AccountService extends EventEmitter {
   private readonly pendingChecks = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly inFlight = new Set<string>();
   private readonly flights = new Map<string, Promise<Account>>();
+  private readonly pageRefreshFlights = new Set<string>();
   private activeChecks = 0;
   private readonly checkWaiters: Array<() => void> = [];
   private readonly lastAttemptAt = new Map<string, number>();
@@ -79,10 +84,15 @@ export class AccountService extends EventEmitter {
   private readonly profileRequests = new Map<string, number>();
   private disposed = false;
   private patrolGeneration = 0;
+  private readonly recoveryPending = new Set<string>();
+  private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly recoveryAttemptAt = new Map<string, number>();
 
   constructor(private readonly options: AccountServiceOptions) {
     super();
     for (const account of options.store.accounts.list()) {
+      if (account.platformId === "weixin_channels" && account.lastOnlineAt)
+        this.recoveryPending.add(account.id);
       if (account.checkInfo?.state === "checking")
         options.store.accounts.updateCheckInfo(account.id, {
           ...account.checkInfo,
@@ -288,6 +298,12 @@ export class AccountService extends EventEmitter {
 
   /** Network revocation does not modify stored login status or emit account-online. */
   suspendNetworkAccount(accountId: string): void {
+    const timer = this.recoveryTimers.get(accountId);
+    if (timer) clearTimeout(timer);
+    this.recoveryTimers.delete(accountId);
+    const account = this.options.store.accounts.get(accountId);
+    if (account?.platformId === "weixin_channels" && account.lastOnlineAt)
+      this.recoveryPending.add(accountId);
     this.cancelCheck(accountId);
     this.lastProbeAt.delete(accountId);
     this.lastAttemptAt.delete(accountId);
@@ -298,12 +314,33 @@ export class AccountService extends EventEmitter {
     this.accountEpoch.set(accountId, (this.accountEpoch.get(accountId) ?? 0) + 1);
   }
 
+  /** One debounced page recheck after startup/revocation, using the existing partition. */
+  resumeNetworkAccount(accountId: string): void {
+    if (this.disposed || this.sessionChanges.has(accountId) || !this.recoveryPending.has(accountId) ||
+        this.recoveryTimers.has(accountId)) return;
+    const delay = Math.max(RECOVERY_DELAY_MS, RECOVERY_RETRY_MS - (Date.now() - (this.recoveryAttemptAt.get(accountId) ?? 0)));
+    const timer = setTimeout(() => {
+      this.recoveryTimers.delete(accountId);
+      if (this.disposed || this.sessionChanges.has(accountId) || !canUseBusinessNetwork(accountId)) return;
+      this.recoveryPending.delete(accountId);
+      this.recoveryAttemptAt.set(accountId, Date.now());
+      void this.checkStatus(accountId, { force: true, refreshPage: true }).catch(() => undefined);
+    }, delay);
+    timer.unref?.();
+    this.recoveryTimers.set(accountId, timer);
+  }
+
   checkStatus(
     accountId: string,
-    opts: { skipProbe?: boolean; silent?: boolean; force?: boolean } = {},
+    opts: { skipProbe?: boolean; silent?: boolean; force?: boolean; refreshPage?: boolean } = {},
   ): Promise<Account> {
     const running = this.flights.get(accountId);
-    if (running) return running;
+    if (running) {
+      if (opts.refreshPage && !this.pageRefreshFlights.has(accountId))
+        return running.then(() => this.checkStatus(accountId, opts));
+      return running;
+    }
+    if (opts.refreshPage) this.pageRefreshFlights.add(accountId);
     const execute = async () => {
       if (this.activeChecks >= 2) await new Promise<void>((resolve) => this.checkWaiters.push(resolve));
       else this.activeChecks++;
@@ -316,6 +353,7 @@ export class AccountService extends EventEmitter {
       }
     };
     const task = execute().finally(() => {
+      this.pageRefreshFlights.delete(accountId);
       if (this.flights.get(accountId) === task) this.flights.delete(accountId);
       if (this.activityDuringCheck.delete(accountId)) {
         this.lastAttemptAt.delete(accountId);
@@ -348,14 +386,23 @@ export class AccountService extends EventEmitter {
 
   private async performCheck(
     accountId: string,
-    opts: { skipProbe?: boolean; silent?: boolean; force?: boolean } = {},
+    opts: { skipProbe?: boolean; silent?: boolean; force?: boolean; refreshPage?: boolean } = {},
   ): Promise<Account> {
     const account = this.options.store.accounts.get(accountId);
     if (!account) throw new Error("账号不存在");
     if (this.disposed || this.sessionChanges.has(accountId)) return account;
     if (this.inFlight.has(accountId)) return account;
+    const initialPage = this.options.viewPool.getState(accountId);
+    // Never replace an active editor, QR login or verification page in the background.
+    const refreshPage = opts.refreshPage && account.platformId === "weixin_channels" &&
+      (!initialPage?.visible || Boolean(initialPage.lastError)) && !initialPage?.loading &&
+      (!initialPage?.url || initialPage.url === "about:blank" || Boolean(initialPage.lastError) ||
+        initialPage.url === getPlatform(account.platformId).routes.home) &&
+      !isVerificationUrl(account.platformId, initialPage?.url ?? "") &&
+      (!isLoginUrl(account.platformId, initialPage?.url ?? "") || Boolean(initialPage?.lastError));
     try {
-      this.prepareCheckNetwork(accountId, account.platformId);
+      if (refreshPage) this.prepareNetworkOperation(accountId, "view-home");
+      else this.prepareCheckNetwork(accountId, account.platformId);
     } catch (error) {
       if (isNetworkDormantError(error))
         return this.recordCheck(accountId, "paused", "国内网络暂停，等待代理关闭或网络检查完成");
@@ -375,6 +422,7 @@ export class AccountService extends EventEmitter {
     try {
       this.lastAttemptAt.set(accountId, Date.now());
       this.recordCheck(accountId, "checking", "正在核实平台登录状态");
+      if (refreshPage) await this.refreshChannelsPage(account, operation, epoch);
       const viewState = this.options.viewPool.getState(accountId);
       const pageActivity = this.pageActivitySequence.get(accountId) ?? 0;
       const homepageContext = isHomepageContext(account.platformId, viewState?.url ?? "");
@@ -394,6 +442,7 @@ export class AccountService extends EventEmitter {
         session: ses,
         currentUrl: viewState?.url ?? null,
         loading: viewState?.loading ?? false,
+        lastError: viewState?.lastError,
         skipProbe,
         probe: this.inPageProbe(accountId, account.platformId, viewState),
         previousStatus: account.status,
@@ -430,10 +479,15 @@ export class AccountService extends EventEmitter {
       ) {
         const key = result.evidenceKey ?? `probe:${epoch}:${++this.attemptSequence}`;
         const prior = this.negativeEvidence.get(accountId);
-        this.negativeEvidence.set(accountId, { key, at: Date.now() });
-        const settledLoginPage = viewState?.url && !viewState.loading &&
+        const settledLoginPage = viewState?.url && !viewState.loading && !viewState.lastError &&
           isLoginUrl(account.platformId, viewState.url);
-        if ((result.source === "homepage" || !settledLoginPage) &&
+        if (settledLoginPage && account.platformId === "weixin_channels" && prior && Date.now() - prior.at < 3000) {
+          this.lastAttemptAt.delete(accountId);
+          this.scheduleCheck(accountId, 3000 - (Date.now() - prior.at));
+          return this.recordCheck(accountId, "unconfirmed", "登录页正在复核，上次登录结论保留");
+        }
+        this.negativeEvidence.set(accountId, { key, at: Date.now() });
+        if ((result.source === "homepage" || !settledLoginPage || account.platformId === "weixin_channels") &&
           (!prior || prior.key === key || Date.now() - prior.at > 60000)) {
           this.lastAttemptAt.delete(accountId);
           this.scheduleCheck(accountId, 3000);
@@ -491,6 +545,38 @@ export class AccountService extends EventEmitter {
     } finally {
       operation.release();
       this.inFlight.delete(accountId);
+    }
+  }
+
+  private async refreshChannelsPage(account: Account, operation: BusinessOperation, epoch: number): Promise<void> {
+    const pool = this.options.viewPool;
+    const assertCurrent = () => {
+      operation.assertCurrent();
+      if (this.disposed || this.sessionChanges.has(account.id) || (this.accountEpoch.get(account.id) ?? 0) !== epoch)
+        throw new NetworkDormantError("GATE_REVOKED");
+    };
+    assertCurrent();
+    const startedAt = Date.now();
+    pool.ensure({ id: account.id, platformId: account.platformId }, { navigate: false });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        pool.navigate(account.id, getPlatform(account.platformId).routes.home),
+        new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("PAGE_RECHECK_TIMEOUT")), 8000); }),
+      ]);
+    } finally { if (timeout) clearTimeout(timeout); }
+    const deadline = Date.now() + 5000;
+    while (true) {
+      assertCurrent();
+      const page = pool.getState(account.id);
+      if (!page || page.lastError) throw new Error("PAGE_RECHECK_FAILED");
+      const evidence = pool.getIdentityEvidence(account.id);
+      if (!page.loading && ((evidence && evidence.observedAt >= startedAt) ||
+          isLoginUrl(account.platformId, page.url) || isVerificationUrl(account.platformId, page.url))) return;
+      // User navigation wins; do not wait on or redirect a newly opened editor.
+      if (page.visible && page.url !== getPlatform(account.platformId).routes.home) return;
+      if (Date.now() >= deadline) return;
+      await wait(100, undefined, { signal: operation.signal });
     }
   }
 
@@ -707,6 +793,9 @@ export class AccountService extends EventEmitter {
     this.stopPatrol();
     for (const timer of this.pendingChecks.values()) clearTimeout(timer);
     this.pendingChecks.clear();
+    for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
+    this.recoveryTimers.clear();
+    this.recoveryPending.clear();
   }
 }
 

@@ -477,6 +477,15 @@ describe("non-Bilibili authentication confirmation", () => {
 describe("detectLoginState", () => {
   const now = Date.parse("2026-09-03T00:00:00Z");
 
+  it("does not trust stale offline evidence while Channels is loading or has failed", async () => {
+    const base = { platformId: "weixin_channels" as const, session: fakeSession([]), previousStatus: "online" as const,
+      currentUrl: getPlatform("weixin_channels").routes.login, now,
+      evidence: { kind: "offline" as const, key: "stale", sequence: 1, observedAt: now, reason: "expired" } };
+    expect(await detectLoginState({ ...base, loading: true })).toMatchObject({ status: "online", unconfirmed: true });
+    expect(await detectLoginState({ ...base, loading: false, lastError: "ERR_TUNNEL_CONNECTION_FAILED" })).toMatchObject({ status: "network_error" });
+    expect(await detectLoginState({ ...base, loading: false, lastError: null })).toMatchObject({ status: "offline" });
+  });
+
   it("does not infer an authentication result from missing cookies and an unknown response", async () => {
     const result = await detectLoginState({ platformId: "douyin", session: fakeSession([]), now });
     expect(result).toMatchObject({ status: "unknown", unconfirmed: true, sessionCookiesPresent: false });

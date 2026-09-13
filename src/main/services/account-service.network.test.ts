@@ -29,6 +29,110 @@ const services: AccountService[] = [];
 const stores: Store[] = [];
 const uninstallers: Array<() => void> = [];
 
+describe("Channels recovery and failed-page authentication", () => {
+  it("waits for a Channels login redirect to settle before confirming logout", async () => {
+    const f = fixture("online", true, undefined, "weixin_channels");
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("weixin_channels").routes.login, loading: false, lastError: null } as ViewState);
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("online");
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("online");
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(f.store.accounts.get(f.account.id)?.status).toBe("offline");
+  });
+
+  it("does not lose a page-refresh request coalesced with a running patrol", async () => {
+    const f = fixture("online", true, undefined, "weixin_channels");
+    const cookies = deferred<never[]>();
+    f.session.cookies.get.mockImplementationOnce(() => cookies.promise);
+    const patrol = f.service.checkStatus(f.account.id);
+    const refresh = f.service.checkStatus(f.account.id, { force: true, refreshPage: true });
+    f.viewPool.navigate.mockRejectedValue(new Error("synthetic load failure"));
+    cookies.resolve([]);
+    await Promise.all([patrol, refresh]);
+    expect(f.viewPool.navigate).toHaveBeenCalledOnce();
+    expect(f.store.accounts.get(f.account.id)?.status).toBe("online");
+  });
+
+  it.each(["ERR_TUNNEL_CONNECTION_FAILED", "ERR_NETWORK_CHANGED", "ERR_TIMED_OUT"])(
+    "preserves stored authentication when a stopped login page failed with %s", async lastError => {
+      const f = fixture("online", true, undefined, "weixin_channels");
+      f.viewPool.getState.mockReturnValue({ url: getPlatform("weixin_channels").routes.login, loading: false, lastError } as ViewState);
+      const checked = await f.service.checkStatus(f.account.id, { force: true });
+      expect(checked).toMatchObject(authFields(f.account)!);
+      expect(checked.checkInfo?.state).toBe("network_error");
+      expect(f.notify).not.toHaveBeenCalled();
+      expect(f.store.audit.list().filter(e => e.action === "account.status")).toEqual([]);
+    },
+  );
+
+  it("rechecks a previously offline Channels account after stable network recovery and fresh identity", async () => {
+    const f = fixture("online", true, undefined, "weixin_channels");
+    f.store.accounts.updateStatus(f.account.id, "offline", "账号页面已跳转至登录页");
+    f.service.suspendNetworkAccount(f.account.id);
+    f.viewPool.navigate.mockImplementation(async () => {
+      f.viewPool.getState.mockReturnValue({ url: getPlatform("weixin_channels").routes.home, loading: false, lastError: null, instanceId: 1, navigationId: 1 } as ViewState);
+      f.viewPool.getIdentityEvidence.mockReturnValue({ kind: "online", key: "recovered", sequence: 1, observedAt: Date.now(), reason: "平台网页已确认登录身份", subject: "self" });
+    });
+    f.service.resumeNetworkAccount(f.account.id);
+    f.service.resumeNetworkAccount(f.account.id);
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(f.viewPool.navigate).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.viewPool.navigate).toHaveBeenCalledExactlyOnceWith(f.account.id, getPlatform("weixin_channels").routes.home);
+    expect(f.store.accounts.get(f.account.id)?.status).toBe("online");
+    expect(browser.wipe).not.toHaveBeenCalled();
+    f.service.resumeNetworkAccount(f.account.id);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(f.viewPool.navigate).toHaveBeenCalledOnce();
+  });
+
+  it("cancels a pending recovery when the network is revoked again", async () => {
+    const f = fixture("online", true, undefined, "weixin_channels");
+    f.service.suspendNetworkAccount(f.account.id);
+    f.service.resumeNetworkAccount(f.account.id);
+    f.revoke();
+    f.service.suspendNetworkAccount(f.account.id);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(f.viewPool.ensure).not.toHaveBeenCalled();
+    expect(f.store.accounts.get(f.account.id)?.status).toBe("online");
+  });
+
+  it.each([
+    { url: "https://channels.weixin.qq.com/platform/post/create", visible: false },
+    { url: "https://channels.weixin.qq.com/login.html", visible: true },
+    { url: "https://channels.weixin.qq.com/platform", visible: true },
+    { url: "https://captcha.qq.com/verify", visible: false },
+  ])("does not replace an active page or hidden editor during background refresh: $url", async page => {
+    const f = fixture("online", true, undefined, "weixin_channels");
+    f.viewPool.getState.mockReturnValue({ ...page, loading: false } as ViewState);
+    await f.service.checkStatus(f.account.id, { force: true, refreshPage: true });
+    expect(f.viewPool.navigate).not.toHaveBeenCalled();
+    expect(browser.wipe).not.toHaveBeenCalled();
+  });
+
+  it("does not accept a late identity after revocation during a page refresh", async () => {
+    const f = fixture("online", true, undefined, "weixin_channels");
+    const navigation = deferred<void>();
+    f.viewPool.navigate.mockReturnValue(navigation.promise);
+    const checking = f.service.checkStatus(f.account.id, { force: true, refreshPage: true });
+    f.revoke();
+    f.service.suspendNetworkAccount(f.account.id);
+    f.viewPool.getIdentityEvidence.mockReturnValue({ kind: "offline", key: "late", sequence: 1, observedAt: Date.now(), reason: "expired" });
+    navigation.resolve();
+    await checking;
+    expect(f.store.accounts.get(f.account.id)).toMatchObject(authFields(f.account)!);
+    expect(f.notify).not.toHaveBeenCalled();
+  });
+
+  it("preserves login when the refreshed management page fails", async () => {
+    const f = fixture("online", true, undefined, "weixin_channels");
+    f.viewPool.navigate.mockRejectedValue(new Error("ERR_TUNNEL_CONNECTION_FAILED"));
+    const checked = await f.service.checkStatus(f.account.id, { force: true, refreshPage: true });
+    expect(checked).toMatchObject(authFields(f.account)!);
+    expect(checked.checkInfo?.state).toBe("network_error");
+    expect(browser.wipe).not.toHaveBeenCalled();
+  });
+});
+
 function authFields(account: Account | undefined) {
   if (!account) return account;
   const { checkInfo: _checkInfo, ...fields } = account;

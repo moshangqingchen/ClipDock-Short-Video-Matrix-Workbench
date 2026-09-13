@@ -584,6 +584,7 @@ async function bootstrap(): Promise<void> {
     if (networkRuntime.enforcement !== "strict") return;
     for (const state of networkRuntime.getAccountStates()) {
       if (state.state === "allowed") {
+        accounts.resumeNetworkAccount(state.accountId);
         scheduler.resumeNetworkAccount(state.accountId);
         const account = store.accounts.get(state.accountId);
         if (account?.status === "online" || account?.status === "expiring")

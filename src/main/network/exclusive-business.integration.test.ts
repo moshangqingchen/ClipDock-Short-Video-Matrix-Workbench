@@ -395,11 +395,10 @@ describe("exclusive network policy across real business services", () => {
       f.scheduler.applySettings(
         f.store.settings.patch({ collectEnabled: trigger === "scheduled", keepaliveEnabled: true }),
       );
-      // Retain an old real database authentication timestamp, making the keepalive interval due.
-      f.store.db.run("UPDATE accounts SET last_checked_at = ? WHERE id = ?", [
-        "2020-01-01T00:00:00.000Z",
-        account.id,
-      ]);
+      // Keepalive uses its durable attempt history, independently of authentication patrols.
+      const previous = f.store.metrics.startRun({ accountId: account.id, platformId: account.platformId,
+        startedAt: "2020-01-01T00:00:00.000Z", status: "skipped", trigger: "keepalive" });
+      f.store.metrics.finishRun(previous, { status: "skipped", metricsWritten: 0, worksWritten: 0 });
       expect(f.store.collectJobs.list(account.id)).toEqual([]);
       await vi.advanceTimersByTimeAsync(180_000);
       const jobs = f.store.collectJobs.list(account.id);

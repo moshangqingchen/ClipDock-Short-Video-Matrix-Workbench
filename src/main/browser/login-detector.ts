@@ -28,6 +28,8 @@ export interface DetectionInput {
   /** Current top-level URL of the account view, if one exists. */
   currentUrl?: string | null;
   loading?: boolean;
+  /** A stopped load can be an error document, not a successfully loaded login page. */
+  lastError?: string | null;
   /** Skip the network probe; cookies and ordinary page URLs cannot confirm a fresh login check. */
   skipProbe?: boolean;
   /**
@@ -223,6 +225,10 @@ export async function detectLoginState(input: DetectionInput): Promise<Detection
   const platform = getPlatform(input.platformId);
   const url = input.currentUrl ?? "";
 
+  if (input.lastError) {
+    return { status: "network_error", message: "账号页面加载失败，等待网络恢复后复核；上次登录结论保留", sessionCookiesPresent: false };
+  }
+
   // Consumer and creator sessions may expire independently. A homepage's own
   // authenticated UI is authoritative here; a creator API must not veto it.
   // This also deliberately avoids TTL estimates and cookie-name heuristics.
@@ -259,6 +265,9 @@ export async function detectLoginState(input: DetectionInput): Promise<Detection
     return { status: "needs_verification", message: "平台要求完成安全验证", sessionCookiesPresent: present };
   }
   const identityPlatform = input.platformId === "kuaishou" || input.platformId === "weixin_channels";
+  if (identityPlatform && input.loading) {
+    return { status: input.previousStatus ?? "unknown", message: "账号页面正在加载，等待身份确认", sessionCookiesPresent: present, unconfirmed: true };
+  }
   let confirmedLoginPage = false;
   try {
     const page = new URL(url);

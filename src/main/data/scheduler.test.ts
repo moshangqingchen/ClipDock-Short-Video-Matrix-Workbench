@@ -142,6 +142,35 @@ const revoke = () => {
 };
 
 describe("CollectScheduler network queue", () => {
+  it("uses a durable keepalive clock even when patrols update attemptedAt every five minutes", async () => {
+    allowed = true;
+    const s = setup();
+    scheduler.applySettings({ ...store.settings.get(), collectEnabled: false, keepaliveEnabled: true, keepaliveIntervalHours: 12 });
+    // Move the wall clock forward without creating hours of irrelevant timer work.
+    vi.setSystemTime(Date.now() + 13 * 3600_000);
+    store.accounts.updateCheckInfo(s.account.id, { state: "unconfirmed", reason: "patrol", attemptedAt: new Date().toISOString() });
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(s.checkStatus).toHaveBeenCalledOnce();
+    expect(store.metrics.lastKeepaliveRun(s.account.id)?.trigger).toBe("keepalive");
+    expect(store.metrics.lastAttemptedRun(s.account.id)).toBeNull();
+    // Restart the scheduler; the persisted attempt must prevent a repeat every minute.
+    scheduler.stop();
+    scheduler = new CollectScheduler({ store, accounts: s.accounts, pool: s.pool, collectors: { get: () => ({ workingUrl: getPlatform("douyin").routes.home, collect: s.collect }) } as unknown as CollectorRegistry, notify: vi.fn() });
+    scheduler.applySettings({ ...store.settings.get(), collectEnabled: false, keepaliveEnabled: true, keepaliveIntervalHours: 12 });
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.checkStatus).toHaveBeenCalledOnce();
+  });
+
+  it("requests a fresh Channels page observation for keepalive without collecting data", async () => {
+    allowed = true;
+    const s = setup("weixin_channels");
+    scheduler.enqueue(s.account.id, "keepalive");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(s.checkStatus).toHaveBeenCalledExactlyOnceWith(s.account.id, { force: true, refreshPage: true });
+    expect(s.collect).not.toHaveBeenCalled();
+  });
+
   it("refreshes a stale Channels console and collects only after fresh identity arrives", async () => {
     allowed=true;
     const s=setup("weixin_channels");
