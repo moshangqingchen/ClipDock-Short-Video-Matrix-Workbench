@@ -11,7 +11,7 @@ import { partitionForAccount } from "@main/browser/partition";
 import { globalAccountSchema } from "@shared/global-accounts";
 import { globalWorkSchema, globalPublishRecordSchema } from "@shared/global-workspace";
 import { webObservationSchema } from "@shared/global-web-observation";
-import { GlobalAccountRepository } from "@main/api/global-account-repository";
+import { GlobalAccountRepository, MAX_GLOBAL_ACCOUNTS } from "@main/api/global-account-repository";
 import { GlobalWebObservationRepository } from "@main/data/global-web-observation-repository";
 import { GlobalWorkspaceRepository } from "@main/data/global-workspace-repository";
 
@@ -134,7 +134,13 @@ const backupAssetSchema = z.object({
   durationMs: z.number().finite().nonnegative().nullish(),
   width: z.number().int().nonnegative().nullish(),
   height: z.number().int().nonnegative().nullish(),
-  thumbnailPath: z.string().max(32_768).nullish(),
+  // Cache paths belong to this installation, never to a restored backup.
+  // Keep accepting legacy paths for checksum validation, then discard them.
+  thumbnailPath: z
+    .string()
+    .max(32_768)
+    .nullish()
+    .transform(() => null),
   createdAt: dateSchema,
 });
 
@@ -454,10 +460,30 @@ export function assertBackupAccountIdentities(store: Store, payload: BackupPaylo
   }
 }
 
+/** Validate the final distinct account count before pausing views and inside the write transaction. */
+export function assertBackupAccountCapacity(
+  store: Store,
+  payload: BackupPayload,
+  mode: "merge" | "replace",
+): void {
+  const domesticIds = new Set(mode === "merge" ? store.accounts.list().map((row) => row.id) : []);
+  for (const account of payload.accounts) domesticIds.add(account.id);
+  if (domesticIds.size > MAX_ACCOUNTS) throw new Error(`合并后国内账号超过 ${MAX_ACCOUNTS} 个，未导入备份`);
+  if (payload.global) {
+    const globalIds = new Set(
+      mode === "merge" ? store.db.all("SELECT id FROM global_accounts").map((row) => String(row.id)) : [],
+    );
+    for (const account of payload.global.accounts) globalIds.add(account.id);
+    if (globalIds.size > MAX_GLOBAL_ACCOUNTS)
+      throw new Error(`合并后国外账号超过 ${MAX_GLOBAL_ACCOUNTS} 个，未导入备份`);
+  }
+}
+
 export function applyBackup(store: Store, payload: BackupPayload, mode: "merge" | "replace"): number {
   const safePayload = normalizePayload(payload);
   return store.db.transaction(() => {
     assertBackupAccountIdentities(store, safePayload);
+    assertBackupAccountCapacity(store, safePayload, mode);
     if (mode === "replace") {
       store.db.exec(
         "DELETE FROM publish_records; DELETE FROM works; DELETE FROM metric_snapshots; DELETE FROM collect_runs; DELETE FROM accounts;",

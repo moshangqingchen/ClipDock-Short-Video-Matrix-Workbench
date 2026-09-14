@@ -150,7 +150,16 @@ export class AssetService {
 
   async remove(id: string): Promise<void> {
     const asset = this.store.assets.get(id);
-    if (asset?.thumbnailPath) await fs.promises.unlink(asset.thumbnailPath).catch(() => undefined);
+    // Only delete this asset's locally generated cache file. Imported metadata
+    // must never grant permission to delete a source file or another asset's cache.
+    if (asset?.thumbnailPath && /^[0-9a-f-]{36}$/i.test(asset.id)) {
+      const thumbnail = path.resolve(this.thumbnailDir, `${asset.id}.png`);
+      if (
+        path.relative(thumbnail, path.resolve(asset.thumbnailPath)) === "" &&
+        path.relative(thumbnail, path.resolve(asset.filePath)) !== ""
+      )
+        await fs.promises.unlink(thumbnail).catch(() => undefined);
+    }
     this.store.assets.remove(id);
   }
 

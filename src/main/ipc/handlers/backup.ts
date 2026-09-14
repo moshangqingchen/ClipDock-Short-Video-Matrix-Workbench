@@ -6,6 +6,7 @@ import type { ViewPool } from "@main/browser/view-pool";
 import type { AccountService } from "@main/services/account-service";
 import {
   applyBackup,
+  assertBackupAccountCapacity,
   assertBackupAccountIdentities,
   buildBackup,
   readBackup,
@@ -54,6 +55,7 @@ export function registerBackupHandlers(ipc: IpcRegistrar, deps: BackupHandlerDep
       if (result.canceled || result.filePaths.length === 0) return null;
       const payload = await readBackup(result.filePaths[0], options.password);
       assertBackupAccountIdentities(deps.store, payload);
+      assertBackupAccountCapacity(deps.store, payload, options.mode);
       deps.validateAccountIdentities?.(payload.accounts);
       if (options.mode === "replace") {
         // Views of accounts about to disappear must be torn down first; their

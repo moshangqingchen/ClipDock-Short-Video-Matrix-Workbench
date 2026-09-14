@@ -23,6 +23,45 @@ function writeLegacyBackup(value: unknown, version = 2, withChecksum = true): st
 }
 
 describe("backup", () => {
+  it("discards legacy thumbnail paths on restore and exports only portable asset references", async () => {
+    const source = createStore(":memory:"),
+      target = createStore(":memory:");
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "svbak-thumbnail-"));
+    const file = path.join(directory, "legacy.svbak");
+    try {
+      const asset = source.assets.insert({
+        id: randomUUID(),
+        kind: "image",
+        filePath: "C:/media/source.png",
+        fileName: "source.png",
+        sizeBytes: 1,
+        thumbnailPath: "C:/unrelated/important.txt",
+        createdAt: new Date().toISOString(),
+      });
+      const payload = buildBackup(source, "test");
+      expect(payload.assets[0].thumbnailPath).toBeNull();
+      expect(source.assets.get(asset.id)?.thumbnailPath).toBe(asset.thumbnailPath);
+      const legacy = {
+        ...payload,
+        metadata: { ...payload.metadata, checksum: undefined },
+        assets: [asset],
+      };
+      legacy.metadata.checksum = createHash("sha256").update(JSON.stringify(legacy)).digest("hex");
+      fs.writeFileSync(
+        file,
+        JSON.stringify({ format: "sv-workbench-backup", version: 2, encrypted: false, payload: legacy }),
+      );
+      const restored = await readBackup(file);
+      expect(restored.assets[0]).toMatchObject({ filePath: asset.filePath, thumbnailPath: null });
+      applyBackup(target, restored, "merge");
+      expect(target.assets.get(asset.id)?.thumbnailPath).toBeNull();
+    } finally {
+      source.close();
+      target.close();
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+      fs.rmdirSync(directory);
+    }
+  });
   it.each([
     "https://images.example.test/path-capability/avatar.jpg?signature=private-media",
     "sv-asset://remote/86cd4ebf-007c-4b24-8b0a-6b84097f304a",

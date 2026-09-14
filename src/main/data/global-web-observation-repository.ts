@@ -47,7 +47,9 @@ export class GlobalWebObservationRepository {
     this.db.transaction(() => {
       this.db.run(
         `INSERT INTO global_web_observations (account_id, snapshot_json) VALUES (?, ?)
-      ON CONFLICT(account_id) DO UPDATE SET snapshot_json=excluded.snapshot_json`,
+      ON CONFLICT(account_id) DO UPDATE SET snapshot_json=excluded.snapshot_json
+      WHERE julianday(json_extract(excluded.snapshot_json, '$.capturedAt')) >=
+            julianday(json_extract(global_web_observations.snapshot_json, '$.capturedAt'))`,
         [snapshot.accountId, JSON.stringify(snapshot)],
       );
       this.db.run(
