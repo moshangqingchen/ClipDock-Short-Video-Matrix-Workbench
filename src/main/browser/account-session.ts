@@ -5,6 +5,7 @@ import { ensureSessionObservation, initializeAccountSessionNetwork } from "@main
 import { canUseBusinessNetwork, isStrictBusinessNetwork } from "@main/network/business-access";
 import { toChromeUserAgent } from "./user-agent";
 import { partitionForAccount } from "./partition";
+import { flushCookieGuards } from "./cookie-guard";
 
 export { partitionForAccount };
 
@@ -110,7 +111,9 @@ export function configureAccountSession(accountId: string, _platformId: Platform
 
 /** Session lifetime, independent of views already destroyed during a strict shutdown. */
 export async function flushAccountSessionCookies(): Promise<void> {
-  await Promise.allSettled([...accountSessions].map((ses) => ses.cookies.flushStore()));
+  if (!await flushCookieGuards()) throw new Error("COOKIE_PERSISTENCE_INCOMPLETE");
+  const results = await Promise.allSettled([...accountSessions].map((ses) => ses.cookies.flushStore()));
+  if (results.some((result) => result.status === "rejected")) throw new Error("COOKIE_FLUSH_FAILED");
 }
 
 /**
@@ -120,6 +123,7 @@ export async function flushAccountSessionCookies(): Promise<void> {
  */
 export async function wipeAccountSession(accountId: string): Promise<void> {
   const ses = electronSession.fromPartition(partitionForAccount(accountId), { cache: true });
+  if (!await flushCookieGuards(ses)) throw new Error("登录数据仍在保存，请稍后重试重置");
   await ses.clearStorageData();
   await ses.clearCache();
   await ses.clearAuthCache();

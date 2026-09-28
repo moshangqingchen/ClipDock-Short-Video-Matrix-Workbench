@@ -3,6 +3,9 @@ import fs from "node:fs";
 import { z } from "zod";
 import type { BackupMetadata, BackupPayload } from "@shared/types";
 import { METRIC_NAMES } from "@shared/types";
+import { WORK_METRICS } from "@shared/types";
+import { analyticsRecordSchema } from "@shared/business-analytics";
+import { BusinessAnalyticsRepository } from "@main/data/business-analytics-repository";
 import { CN_PLATFORM_IDS } from "@shared/platforms";
 import type { Store } from "@main/db";
 import { MAX_ACCOUNTS } from "@main/db/repositories/accounts";
@@ -45,11 +48,11 @@ const globalBackupSchema = z
   });
 
 const FORMAT = "sv-workbench-backup" as const;
-const VERSION = 3;
+const VERSION = 4;
 const MAX_BYTES = 256 * 1024 * 1024;
 const KDF = { N: 16_384, r: 8, p: 1 };
 
-const versionSchema = z.union([z.literal(1), z.literal(2), z.literal(VERSION)]);
+const versionSchema = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(VERSION)]);
 const dateSchema = z.string().datetime({ offset: true });
 const optionalText = z.string().max(20_000).nullish();
 const optionalDate = dateSchema.nullish();
@@ -91,6 +94,7 @@ const backupAccountSchema = z
   }));
 
 const backupMetricSchema = z.object({
+  origin: z.enum(["official", "page", "legacy"]).optional(),
   id: z.number().int().positive().optional(),
   accountId: uuidSchema,
   platformId: platformSchema,
@@ -104,6 +108,7 @@ const backupMetricSchema = z.object({
 const backupWorkSchema = z
   .object({
     id: z.string().min(1).max(1000),
+    observations: z.partialRecord(z.enum(WORK_METRICS), z.object({ capturedAt: dateSchema, origin: z.enum(["official", "page", "legacy"]) })).optional(),
     accountId: uuidSchema,
     platformId: platformSchema,
     remoteId: z.string().min(1).max(1000),
@@ -190,6 +195,7 @@ const metadataSchema = z.object({
 
 const backupPayloadSchema = z
   .object({
+    analytics: z.array(analyticsRecordSchema).max(100_000).optional(),
     metadata: metadataSchema,
     accounts: z.array(backupAccountSchema).max(MAX_ACCOUNTS),
     metrics: z.array(backupMetricSchema).max(500_000).default([]),
@@ -218,6 +224,10 @@ const backupPayloadSchema = z
       });
     }
     const accounts = new Map(payload.accounts.map((account) => [account.id, account.platformId]));
+    for (const [index, row] of (payload.analytics ?? []).entries()) {
+      if (accounts.get(row.accountId) !== row.platformId) fail(["analytics", index, "accountId"], "经营数据账号不一致");
+      if (row.workId && !payload.works.some((work) => work.id === row.workId && work.accountId === row.accountId)) fail(["analytics", index, "workId"], "经营数据作品不一致");
+    }
     for (const key of ["metrics", "works", "publishRecords"] as const) {
       payload[key].forEach((row, index) => {
         if (accounts.get(row.accountId) !== row.platformId)
@@ -327,6 +337,8 @@ function normalizePayload(value: unknown, verifyChecksum = true): BackupPayload 
  * restored account must be logged in again, by design.
  */
 export function buildBackup(store: Store, appVersion: string): BackupPayload {
+  if (Number(store.db.get("SELECT COUNT(*) AS n FROM metric_snapshots")?.n) > 500_000)
+    throw new Error("指标超过当前备份容量，已停止导出，未生成截断备份");
   const accounts = store.accounts.list();
   const settings = store.settings.get();
   assertSafe(settings);
@@ -345,6 +357,7 @@ export function buildBackup(store: Store, appVersion: string): BackupPayload {
       },
       accounts,
       metrics: store.metrics.listSnapshots(undefined, 500_000),
+      analytics: new BusinessAnalyticsRepository(store.db).all(),
       works: store.metrics.allWorks(),
       assets: store.assets.list(),
       publishRecords: store.publish.list(),
@@ -524,7 +537,8 @@ export function applyBackup(store: Store, payload: BackupPayload, mode: "merge" 
     for (const account of safePayload.accounts) store.accounts.upsertRaw(account);
     for (const asset of safePayload.assets) store.assets.insert(asset);
     store.metrics.upsertWorks(safePayload.works);
-    store.metrics.saveSnapshots(safePayload.metrics);
+    store.metrics.saveSnapshots(safePayload.metrics, true);
+    if (safePayload.analytics) new BusinessAnalyticsRepository(store.db).save(safePayload.analytics);
     for (const record of safePayload.publishRecords) store.publish.upsertRaw(record);
     store.settings.patch(safePayload.settings);
     return safePayload.accounts.length + (safePayload.global?.accounts.length ?? 0);

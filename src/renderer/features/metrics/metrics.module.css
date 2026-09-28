@@ -126,10 +126,14 @@
 /* detail */
 .detailHead {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 14px;
   margin-bottom: 18px;
 }
+.detailIdentity { flex: 1 1 200px; min-width: 200px; overflow-wrap: anywhere; }
+.detailActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.detailActions > * { flex-shrink: 0; }
 .detailHead h2 {
   font-size: var(--text-xl);
 }

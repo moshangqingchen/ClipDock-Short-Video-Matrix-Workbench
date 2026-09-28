@@ -12,7 +12,16 @@ workbench-data/
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
 *.log
+/profiles/
+/global-browser-profiles/
+/recovery-points/
+/thumbnails/
 
 # tooling
 .vite/
@@ -38,6 +47,7 @@ docs/network-startup-before.json
 docs/network-startup-after.json
 docs/network-stage2-rule-merge-result.json
 .workbuddy/
+.claude/settings.local.json
 /index-*.js
 
 # local credentials

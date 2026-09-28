@@ -69,6 +69,7 @@ function fixture(initiallyAllowed = true) {
 
 afterEach(() => {
   for (const dispose of cleanup.splice(0).reverse()) dispose();
+  vi.useRealTimers();
 });
 
 /** An unresolved executeJavaScript must not hold the main task indefinitely. */
@@ -90,6 +91,20 @@ async function boundedRejection(promise: Promise<unknown>): Promise<unknown> {
 }
 
 describe("page collector network and task cancellation", () => {
+  it("aborts a stalled browser request after 20 seconds and releases its lease", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    let aborted = false;
+    f.fetch.mockImplementation((_url, options) => new Promise((_resolve, reject) => {
+      options?.signal?.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); });
+    }));
+    const result = pageFetch(f.wc, "/fixture-stall").catch((error: Error) => error.message);
+    await vi.advanceTimersByTimeAsync(20_001);
+    expect(await result).toBe("page-evaluation-timeout");
+    expect(aborted).toBe(true);
+    expect(f.leases[0].release).toHaveBeenCalledOnce();
+    expect(f.pendingCount()).toBe(0);
+  });
   it("does not execute page code or fetch while the gate is closed", async () => {
     const f = fixture(false);
     await expect(pageFetch(f.wc, "/fixture-data")).rejects.toBeInstanceOf(NetworkDormantError);

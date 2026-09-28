@@ -1,8 +1,8 @@
 import type { Work } from "@shared/types";
 import { PLATFORMS } from "@shared/platforms";
 import {
+  completeProfile,
   DEFAULT_LABELS,
-  aggregateFromWorks,
   domScrapeNumbers,
   emptyResult,
   firstDefined,
@@ -14,6 +14,8 @@ import {
   toIso,
   toNumber,
   worksToMetrics,
+  worksJson,
+  recordWorksPage,
   type Collector,
   type CollectorContext,
   type CollectorProfile,
@@ -90,12 +92,12 @@ async function readProfile(ctx: CollectorContext): Promise<CollectorProfile | nu
 }
 
 async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work[] | null> {
-  const json = await firstJson(
-    ctx.webContents,
+  const json = await worksJson(
+    ctx,
     [
-      { url: `${BASE}/web/api/media/aweme/post/?status=0&count=30&scene=star_atlas&max_cursor=0` },
-      { url: `${BASE}/web/api/media/aweme/post/?count=30&max_cursor=0` },
-      { url: `${BASE}/aweme/v1/creator/item/list/?count=30&cursor=0` },
+      { url: `${BASE}/web/api/media/aweme/post/?status=0&count=30&scene=star_atlas&max_cursor=${encodeURIComponent(ctx.progress?.cursor || "0")}` },
+      { url: `${BASE}/web/api/media/aweme/post/?count=30&max_cursor=${encodeURIComponent(ctx.progress?.cursor || "0")}` },
+      { url: `${BASE}/aweme/v1/creator/item/list/?count=30&cursor=${encodeURIComponent(ctx.progress?.cursor || "0")}` },
     ],
     (j) =>
       Array.isArray(pick(j, "aweme_list")) ||
@@ -106,6 +108,7 @@ async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work
   const list = (pick(json, "aweme_list") ??
     pick(json, "data.aweme_list") ??
     pick(json, "item_list")) as any[];
+  recordWorksPage(ctx, json, list, "cursor", ["max_cursor","data.max_cursor","cursor","data.cursor"]);
   return list
     .map((item) => {
       const remoteId = String(firstDefined(item, ["aweme_id", "item_id", "id"]) ?? "");
@@ -122,11 +125,11 @@ async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work
           url: `https://www.douyin.com/video/${remoteId}`,
           publishedAt: toIso(firstDefined(item, ["create_time", "publish_time"])),
           status: String(firstDefined(item, ["status", "aweme_status", "item_status"]) ?? "") || null,
-          plays: toNumber(firstDefined(stats, ["play_count", "vv"])) ?? 0,
-          likes: toNumber(firstDefined(stats, ["digg_count", "like_count"])) ?? 0,
-          comments: toNumber(firstDefined(stats, ["comment_count"])) ?? 0,
-          shares: toNumber(firstDefined(stats, ["share_count", "forward_count"])) ?? 0,
-          favorites: toNumber(firstDefined(stats, ["collect_count", "favorite_count"])) ?? 0,
+          plays: toNumber(firstDefined(stats, ["play_count", "vv"])),
+          likes: toNumber(firstDefined(stats, ["digg_count", "like_count"])),
+          comments: toNumber(firstDefined(stats, ["comment_count"])),
+          shares: toNumber(firstDefined(stats, ["share_count", "forward_count"])),
+          favorites: toNumber(firstDefined(stats, ["collect_count", "favorite_count"])),
         },
         fetchedAt,
       );
@@ -145,26 +148,15 @@ export const douyinCollector: Collector = {
   async collect(ctx): Promise<CollectorResult> {
     const result = emptyResult();
     const capturedAt = new Date().toISOString();
-    let profile = await readProfile(ctx);
-    if (!profile) {
-      const scraped = await domScrapeNumbers(ctx.webContents, DEFAULT_LABELS);
-      if (Object.keys(scraped).length) {
-        profile = {
-          followers: scraped.followers ?? null,
-          likes: scraped.likes ?? null,
-          works: scraped.works ?? null,
-        };
-        result.warnings.push("接口不可用,已从页面读取概览数据");
-      } else {
-        result.warnings.push("无法读取账号概览");
-      }
-    }
+    let profile = ctx.skipProfile ? null : await readProfile(ctx);
+    if (!ctx.skipProfile) profile = completeProfile(profile, await domScrapeNumbers(ctx.webContents, DEFAULT_LABELS), result.warnings);
     const fetchedWorks = await readWorks(ctx, capturedAt);
     if (fetchedWorks === null) result.warnings.push("作品接口不可用");
     const works = fetchedWorks ?? [];
-    if (profile && works.length) profile = { ...profile, ...aggregateFromWorks(works) };
     result.profile = profile;
     result.works = works;
+    result.page = ctx.pageResult;
+    if (result.page?.hasMore === null) result.warnings.push(result.page.reason ?? "分页范围未确认");
     result.metrics = [
       ...(profile ? profileToMetrics(ctx.account, profile, capturedAt) : []),
       ...worksToMetrics(works, capturedAt),

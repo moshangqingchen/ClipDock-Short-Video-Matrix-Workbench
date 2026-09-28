@@ -4,7 +4,6 @@ import {
   LoggedOutError,
   emptyResult,
   firstDefined,
-  firstJson,
   firstUrl,
   makeWork,
   pick,
@@ -12,6 +11,8 @@ import {
   toIso,
   toNumber,
   worksToMetrics,
+  worksJson,
+  recordWorksPage,
   type Collector,
   type CollectorContext,
   type CollectorProfile,
@@ -20,19 +21,6 @@ import {
 
 const BASE = "https://channels.weixin.qq.com/cgi-bin/mmfinderassistant-bin";
 const HEADERS = { "content-type": "application/json", accept: "application/json" };
-
-function body(extra: Record<string, unknown> = {}): string {
-  return JSON.stringify({
-    timestamp: String(Date.now()),
-    _log_finder_uin: "",
-    _log_finder_id: "",
-    rawKeyBuff: null,
-    pluginSessionId: null,
-    scene: 7,
-    reqScene: 7,
-    ...extra,
-  });
-}
 
 function assertLoggedIn(json: any): void {
   const code = pick(json, "errCode");
@@ -47,33 +35,22 @@ async function readProfile(ctx: CollectorContext): Promise<CollectorProfile | nu
 }
 
 async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work[] | null> {
-  const json = await firstJson(
-    ctx.webContents,
-    [
-      {
-        url: `${BASE}/post/post_list`,
-        init: {
-          method: "POST",
-          headers: HEADERS,
-          body: body({
-            pageSize: 30,
-            currentPage: 1,
-            onlyUnread: false,
-            userpageType: 3,
-            needAllCommentCount: true,
-          }),
-        },
-      },
-      {
-        url: `${BASE}/post/post_list`,
-        init: { method: "POST", headers: HEADERS, body: body({ pageSize: 30, currentPage: 1 }) },
-      },
-    ],
-    (j) => Array.isArray(pick(j, "data.list")),
-  );
+  const observed = ctx.observedWorksRequest?.();
+  if (!observed?.body) {
+    ctx.pageResult = { nextCursor: ctx.progress?.cursor ?? "", nextPage: ctx.progress?.page ?? 1,
+      hasMore: null, reason: "等待官方作品页的有效请求，请打开作品管理页后重试" };
+    return null;
+  }
+  const pageBody = JSON.parse(observed.body) as Record<string, unknown>;
+  pageBody.currentPage = ctx.progress?.page ?? 1;
+  pageBody.pageSize = 30;
+  const json = await worksJson(ctx, [{ url: `${BASE}/post/post_list`,
+    init: { method: "POST", headers: HEADERS, body: JSON.stringify(pageBody) } }],
+    (j) => Array.isArray(pick(j, "data.list")));
   if (!json) return null;
   assertLoggedIn(json);
   const list = pick(json, "data.list") as any[];
+  recordWorksPage(ctx, json, list, "page", []);
   return list
     .map((item) => {
       const remoteId = String(firstDefined(item, ["objectId", "exportId", "id"]) ?? "");
@@ -89,11 +66,11 @@ async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work
           url: null,
           publishedAt: toIso(firstDefined(item, ["createTime", "createtime", "publishTime"])),
           status: String(firstDefined(item, ["objectStatus", "status"]) ?? "") || null,
-          plays: toNumber(firstDefined(item, ["readCount", "playCount", "viewCount"])) ?? 0,
-          likes: toNumber(firstDefined(item, ["likeCount", "likeCnt"])) ?? 0,
-          comments: toNumber(firstDefined(item, ["commentCount", "commentCnt"])) ?? 0,
-          shares: toNumber(firstDefined(item, ["forwardCount", "shareCount"])) ?? 0,
-          favorites: toNumber(firstDefined(item, ["favCount", "favoriteCount"])) ?? 0,
+          plays: toNumber(firstDefined(item, ["readCount", "playCount", "viewCount"])),
+          likes: toNumber(firstDefined(item, ["likeCount", "likeCnt"])),
+          comments: toNumber(firstDefined(item, ["commentCount", "commentCnt"])),
+          shares: toNumber(firstDefined(item, ["forwardCount", "shareCount"])),
+          favorites: toNumber(firstDefined(item, ["favCount", "favoriteCount"])),
         },
         fetchedAt,
       );
@@ -103,11 +80,11 @@ async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work
 
 export const weixinChannelsCollector: Collector = {
   platformId: "weixin_channels",
-  workingUrl: PLATFORMS.weixin_channels.routes.home,
+  workingUrl: PLATFORMS.weixin_channels.routes.works,
 
   async fetchProfile(ctx) {
     try {
-      return await readProfile(ctx);
+      return ctx.skipProfile ? null : await readProfile(ctx);
     } catch (error) {
       if (error instanceof LoggedOutError) return null;
       throw error;
@@ -120,7 +97,7 @@ export const weixinChannelsCollector: Collector = {
     let profile: CollectorProfile | null;
     let fetchedWorks: Work[] | null;
     try {
-      profile = await readProfile(ctx);
+      profile = ctx.skipProfile ? null : await readProfile(ctx);
       fetchedWorks = await readWorks(ctx, capturedAt);
     } catch (error) {
       if (error instanceof LoggedOutError) {
@@ -129,22 +106,13 @@ export const weixinChannelsCollector: Collector = {
       }
       throw error;
     }
-    if (!profile) result.warnings.push("无法读取账号概览");
+    if (!ctx.skipProfile && !profile) result.warnings.push("无法读取账号概览");
     if (fetchedWorks === null) result.warnings.push("作品接口不可用");
     const works = fetchedWorks ?? [];
-    if (profile) {
-      profile = {
-        ...profile,
-        works: profile.works ?? works.length,
-        plays: works.reduce((s, w) => s + w.plays, 0),
-        likes: works.reduce((s, w) => s + w.likes, 0),
-        comments: works.reduce((s, w) => s + w.comments, 0),
-        shares: works.reduce((s, w) => s + w.shares, 0),
-        favorites: works.reduce((s, w) => s + w.favorites, 0),
-      };
-    }
     result.profile = profile;
     result.works = works;
+    result.page = ctx.pageResult;
+    if (result.page?.hasMore === null) result.warnings.push(result.page.reason ?? "分页范围未确认");
     result.metrics = [
       ...(profile ? profileToMetrics(ctx.account, profile, capturedAt) : []),
       ...worksToMetrics(works, capturedAt),

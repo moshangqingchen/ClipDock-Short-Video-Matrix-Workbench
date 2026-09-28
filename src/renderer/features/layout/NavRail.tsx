@@ -1,6 +1,5 @@
 import {
   BarChart3,
-  Clapperboard,
   FolderOpen,
   LayoutDashboard,
   PanelLeftClose,
@@ -12,6 +11,7 @@ import {
 import { cx } from "@renderer/components/ui";
 import { useAccounts, useSettings, useUi, type Route } from "@renderer/store";
 import styles from "./layout.module.css";
+import appIcon from "../../../../resources/app-icon.png";
 
 const ITEMS: Array<{ route: Route; label: string; icon: typeof LayoutDashboard }> = [
   { route: "overview", label: "总览", icon: LayoutDashboard },
@@ -42,9 +42,7 @@ export function NavRail() {
   return (
     <nav className={cx(styles.rail, collapsed && styles.railCollapsed)} aria-label="主导航">
       <div className={styles.brand}>
-        <div className={styles.brandMark}>
-          <Clapperboard size={18} strokeWidth={2.4} />
-        </div>
+        <img className={styles.brandMark} src={appIcon} alt="短视频矩阵工作台" />
         <div className={styles.brandText}>
           <strong>矩阵工作台</strong>
           <span>MATRIX OPS</span>

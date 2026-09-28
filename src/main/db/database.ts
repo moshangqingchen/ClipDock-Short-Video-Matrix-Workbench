@@ -1,6 +1,7 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { MIGRATIONS } from "./migrations";
 
 export type SqlParam = SQLInputValue;
@@ -93,8 +94,23 @@ function dirnameOf(file: string): string {
 
 export function openDatabase(file: string): Database {
   const db = new NodeSqliteDatabase(file);
-  migrate(db);
+  try { migrate(db); } catch (error) { db.close(); throw error; }
   return db;
+}
+
+/** SQLite creates a consistent snapshot including the WAL, without copying live files. */
+export function createRecoveryPoint(db: Database, reason: "upgrade" | "restore"): string | null {
+  if (db.path === ":memory:") return null;
+  if (db.all("PRAGMA quick_check").some((row) => Object.values(row)[0] !== "ok")) throw new Error("数据库完整性异常，停止迁移或恢复");
+  const directory = path.join(path.dirname(db.path), "recovery-points");
+  fs.mkdirSync(directory, { recursive: true });
+  const target = path.join(directory, `${reason}-${Date.now()}-${randomUUID()}.db`);
+  db.run("VACUUM INTO ?", [target]);
+  const snapshot = new DatabaseSync(target, { readOnly: true });
+  try {
+    if (snapshot.prepare("PRAGMA quick_check").all().some((row) => Object.values(row)[0] !== "ok")) throw new Error("恢复点校验失败");
+  } finally { snapshot.close(); }
+  return target;
 }
 
 export function migrate(db: Database): void {
@@ -106,6 +122,7 @@ export function migrate(db: Database): void {
   const applied = new Set(
     db.all<{ version: number }>("SELECT version FROM schema_migrations").map((r) => Number(r.version)),
   );
+  if (applied.size && MIGRATIONS.some((migration) => !applied.has(migration.version))) createRecoveryPoint(db, "upgrade");
   for (const migration of MIGRATIONS) {
     if (applied.has(migration.version)) continue;
     db.transaction(() => {

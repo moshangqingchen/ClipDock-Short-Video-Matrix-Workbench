@@ -1,5 +1,7 @@
 import { build, type BuildOptions } from "esbuild";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { reviewedOperationBuildOptions } from "../../../scripts/reviewed-operation-build.mjs";
 import { CN_PLATFORM_IDS, getPlatform } from "@shared/platforms";
@@ -62,7 +64,20 @@ async function compiled(
     write: false,
     tsconfig: fileURLToPath(new URL("../../../tsconfig.electron.json", import.meta.url)),
     define: defines,
-    plugins: injected.plugins as BuildOptions["plugins"],
+    plugins: [
+      ...(options.reviewedFixture ? [{ name: "historical-catalog-contract-fixture", setup(builder: Parameters<NonNullable<BuildOptions["plugins"]>[number]["setup"]>[0]) {
+        // Only these contract tests combine the frozen declaration with its historical endpoint inventory.
+        // The production-build test above always compiles today's actual source, which must stay unreviewed.
+        builder.onLoad({ filter: /[\\/]network[\\/]operation-catalog\.ts$/ }, (args) => {
+          const source = readFileSync(args.path, "utf8");
+          const historical = readFileSync(path.join(repository, "src/test/fixtures/reviewed-collector-endpoints-v1.txt"), "utf8");
+          const start = source.indexOf("const COLLECTOR_ENDPOINTS:"), end = source.indexOf("\nfunction digest(");
+          if (start < 0 || end < start) throw new Error("Historical catalog fixture boundary changed");
+          return { contents: source.slice(0, start) + historical + source.slice(end), loader: "ts", resolveDir: path.dirname(args.path) };
+        });
+      } }] : []),
+      ...injected.plugins as NonNullable<BuildOptions["plugins"]>,
+    ],
     logLevel: "silent",
     footer: { js: `// isolated review build test ${bundleId++}` },
   });

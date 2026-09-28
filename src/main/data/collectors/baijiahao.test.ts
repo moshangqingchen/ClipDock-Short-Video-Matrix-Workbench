@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CollectorContext } from "./shared";
 import type * as Shared from "./shared";
 const mocks=vi.hoisted(()=>({json:vi.fn(),dom:vi.fn()}));
-vi.mock("./shared",async importOriginal=>({...await importOriginal<typeof Shared>(),firstJson:mocks.json,domScrapeNumbers:mocks.dom}));
+vi.mock("./shared",async importOriginal=>({...await importOriginal<typeof Shared>(),firstJson:mocks.json,worksJson:(ctx: Shared.CollectorContext,candidates: unknown,accept: unknown)=>mocks.json(ctx.webContents,candidates,accept),domScrapeNumbers:mocks.dom}));
 import { baijiahaoCollector } from "./baijiahao";
 describe("Baijiahao page metric fallback",()=>{
   it("retains likes, following, comments, shares and favorites including zero",async()=>{

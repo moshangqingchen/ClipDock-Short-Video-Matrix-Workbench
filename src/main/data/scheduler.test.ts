@@ -13,7 +13,8 @@ import { CollectScheduler } from "./scheduler";
 import { registerMetricsHandlers } from "@main/ipc/handlers/metrics";
 import type { IpcRegistrar } from "@main/ipc/register";
 import { IPC } from "@shared/ipc";
-import { getPlatform, type PlatformId } from "@shared/platforms";
+import { CN_PLATFORM_IDS, getPlatform, type PlatformId } from "@shared/platforms";
+import { makeWork, RateLimitedError } from "./collectors/shared";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -95,10 +96,12 @@ function setup(platformId: PlatformId = "douyin", needsMediaRefresh?: (accountId
     list: () => [],
   } as unknown as CollectorRegistry;
   const notify = vi.fn();
+  const onMetrics = vi.fn();
   const mediaIntake = { avatar: vi.fn(), covers: vi.fn() };
-  scheduler = new CollectScheduler({ store, accounts, pool, collectors, notify, mediaIntake, needsMediaRefresh });
+  scheduler = new CollectScheduler({ store, accounts, pool, collectors, notify, onMetrics, mediaIntake, needsMediaRefresh });
   scheduler.start();
   const payload: CollectorResult = {
+    page: { nextCursor: "", nextPage: 2, hasMore: false },
     profile: { displayName: "迟到昵称" },
     metrics: [
       {
@@ -125,6 +128,7 @@ function setup(platformId: PlatformId = "douyin", needsMediaRefresh?: (accountId
     checkStatus,
     update,
     notify,
+    onMetrics,
     accounts,
     prepareNetworkOperation,
     mediaIntake,
@@ -142,6 +146,116 @@ const revoke = () => {
 };
 
 describe("CollectScheduler network queue", () => {
+  it.each(CN_PLATFORM_IDS)("defers automatic collection while editing or uploading on %s", async (platform) => {
+    allowed = true;
+    const s = setup(platform); s.setPage(getPlatform(platform).routes.upload, true);
+    scheduler.enqueue(s.account.id, "scheduled"); await vi.advanceTimersByTimeAsync(1000);
+    expect(s.collect).not.toHaveBeenCalled(); expect(s.navigate).not.toHaveBeenCalled();
+  });
+  it("commits every page, yields after five, and resumes a paused history without duplicates", async () => {
+    allowed = true;
+    const s = setup();
+    let page = 0;
+    s.collect.mockImplementation(async () => {
+      const current = ++page;
+      return { ...s.payload, profile: null, metrics: [],
+        works: [makeWork(s.account, String(current), { title: String(current) }, new Date().toISOString())],
+        page: { nextPage: current + 1, nextCursor: "", hasMore: current < 7 },
+      };
+    });
+    const job = scheduler.enqueue(s.account.id, "manual", "history");
+    await vi.advanceTimersByTimeAsync(21_000);
+    expect(store.metrics.listWorks(s.account.id)).toHaveLength(5);
+    expect(store.collectJobs.get(job.id)).toMatchObject({ state: "queued", progress: { pagesDone: 5, complete: false } });
+    expect(s.onMetrics).toHaveBeenCalledTimes(5);
+    scheduler.pauseJob(job.id, true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(page).toBe(5);
+    scheduler.pauseJob(job.id, false);
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(store.metrics.listWorks(s.account.id)).toHaveLength(7);
+    expect(store.collectJobs.get(job.id)).toMatchObject({ state: "done", progress: { pagesDone: 7, complete: true } });
+  });
+  it("keeps page one when page two fails and retry starts from the saved cursor", async () => {
+    allowed = true;
+    const s = setup();
+    s.collect.mockResolvedValueOnce({ ...s.payload, works: [makeWork(s.account, "first", { likes: 3 }, new Date().toISOString())],
+      page: { nextPage: 2, nextCursor: "next", hasMore: true } });
+    s.collect.mockRejectedValueOnce(new Error("fixture response failure"));
+    const job = scheduler.enqueue(s.account.id, "manual", "history");
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(store.metrics.listWorks(s.account.id)).toHaveLength(1);
+    expect(store.collectJobs.get(job.id)).toMatchObject({ state: "failed", progress: { pagesDone: 1, page: 2, cursor: "next" } });
+    s.collect.mockResolvedValueOnce({ ...s.payload, page: { nextPage: 3, nextCursor: "", hasMore: false } });
+    scheduler.retryJob(job.id);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(s.collect).toHaveBeenLastCalledWith(expect.objectContaining({ progress: expect.objectContaining({ page: 2, cursor: "next" }) }));
+    expect(store.collectJobs.get(job.id)?.state).toBe("done");
+  });
+  it("does not let manual clicks bypass persisted rate-limit backoff", async () => {
+    allowed = true;
+    const s = setup();
+    s.collect.mockRejectedValueOnce(new RateLimitedError());
+    const job = scheduler.enqueue(s.account.id, "manual", "history");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(store.collectJobs.get(job.id)?.notBefore).toBeGreaterThan(Date.now());
+    scheduler.enqueue(s.account.id, "manual", "history");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(s.collect).toHaveBeenCalledTimes(1);
+  });
+  it("serializes accounts on the same platform", async () => {
+    allowed = true;
+    const s = setup();
+    const other = store.accounts.create({ platformId: "douyin" });
+    store.accounts.updateStatus(other.id, "online", "fixture");
+    scheduler.enqueue(s.account.id, "manual");
+    scheduler.enqueue(other.id, "manual");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(s.collect).toHaveBeenCalledTimes(1);
+    s.result.resolve(s.payload);
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  it("deduplicates overlapping pages beyond thirty works without stopping at a stale reported total", async () => {
+    allowed = true;
+    const s = setup(); let page = 0;
+    s.collect.mockImplementation(async () => {
+      const current = ++page;
+      return { ...s.payload, profile: null, metrics: [],
+        works: Array.from({ length: current < 3 ? 30 : 5 }, (_, i) => makeWork(s.account, String((current - 1) * 25 + i), { likes: 0 }, new Date().toISOString())),
+        page: { nextPage: current + 1, nextCursor: "", hasMore: current < 3, total: 30 },
+      };
+    });
+    const job = scheduler.enqueue(s.account.id, "manual", "history");
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(store.metrics.listWorks(s.account.id, 100)).toHaveLength(55);
+    expect(store.collectJobs.get(job.id)).toMatchObject({ state: "done", progress: { worksSeen: 55, complete: true } });
+  });
+  it("preserves platform Retry-After after cancelling the throttled task", async () => {
+    allowed = true;
+    const s = setup();
+    s.collect.mockRejectedValueOnce(new RateLimitedError("fixture", 3600_000));
+    const job = scheduler.enqueue(s.account.id, "manual", "history");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(store.collectJobs.get(job.id)?.notBefore).toBeGreaterThan(Date.now() + 3500_000);
+    scheduler.cancelJob(job.id); scheduler.enqueue(s.account.id, "manual", "history");
+    const other = store.accounts.create({ platformId: "douyin" }); store.accounts.updateStatus(other.id, "online", "fixture");
+    scheduler.enqueue(other.id, "manual");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(s.collect).toHaveBeenCalledOnce();
+  });
+  it("rechecks a repeating cursor from page one without deleting previously collected works", async () => {
+    allowed = true;
+    const s = setup();
+    s.collect.mockResolvedValue({ ...s.payload, profile: null, metrics: [], works: [makeWork(s.account, "same", {}, new Date().toISOString())], page: { nextPage: 2, nextCursor: "next", hasMore: true } });
+    const job = scheduler.enqueue(s.account.id, "manual", "history");
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(store.collectJobs.get(job.id)).toMatchObject({ state: "failed", progress: { complete: false, worksSeen: 1 } });
+    s.collect.mockResolvedValueOnce({ ...s.payload, profile: null, metrics: [], works: [makeWork(s.account, "same", {}, new Date().toISOString())], page: { nextPage: 2, nextCursor: "", hasMore: false } });
+    scheduler.retryJob(job.id); await vi.advanceTimersByTimeAsync(1000);
+    expect(s.collect).toHaveBeenLastCalledWith(expect.objectContaining({ progress: expect.objectContaining({ page: 1, cursor: "" }) }));
+    expect(store.collectJobs.get(job.id)).toMatchObject({ state: "done", progress: { complete: true, worksSeen: 1 } });
+    expect(store.metrics.listWorks(s.account.id)).toHaveLength(1);
+  });
   it("uses a durable keepalive clock even when patrols update attemptedAt every five minutes", async () => {
     allowed = true;
     const s = setup();
@@ -168,6 +282,127 @@ describe("CollectScheduler network queue", () => {
     scheduler.enqueue(s.account.id, "keepalive");
     await vi.advanceTimersByTimeAsync(1000);
     expect(s.checkStatus).toHaveBeenCalledExactlyOnceWith(s.account.id, { force: true, refreshPage: true });
+    expect(s.collect).not.toHaveBeenCalled();
+  });
+
+  it("defers a Channels keepalive through collection cooldown without consuming its interval, including after restart", async () => {
+    allowed = true;
+    const s = setup("weixin_channels");
+    scheduler.applySettings({ ...store.settings.get(), collectEnabled: false, keepaliveEnabled: true });
+    s.getIdentityEvidence.mockReturnValue({ key: "fresh", kind: "online", subject: "self", profile: { externalId: "self" } });
+    s.collect.mockResolvedValue(s.payload);
+    s.checkStatus.mockImplementation(async () => store.accounts.updateCheckInfo(s.account.id, {
+      state: "confirmed", reason: "平台网页已确认登录身份", attemptedAt: new Date().toISOString(),
+    })!);
+    scheduler.enqueue(s.account.id, "manual");
+    await vi.advanceTimersByTimeAsync(1000);
+    const job = scheduler.enqueue(s.account.id, "keepalive");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(s.checkStatus).not.toHaveBeenCalled();
+    expect(store.collectJobs.get(job.id)).toMatchObject({ state: "queued", message: "等待上次任务冷却后检查登录状态" });
+    expect(store.collectJobs.get(job.id)?.notBefore).toBeGreaterThan(Date.now());
+    expect(store.metrics.lastKeepaliveRun(s.account.id)).toBeNull();
+    scheduler.stop();
+    scheduler = new CollectScheduler({ store, accounts: s.accounts, pool: s.pool,
+      collectors: { get: () => ({ workingUrl: getPlatform("weixin_channels").routes.home, collect: s.collect }) } as unknown as CollectorRegistry,
+      notify: vi.fn() });
+    scheduler.applySettings({ ...store.settings.get(), collectEnabled: false, keepaliveEnabled: true });
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.checkStatus).toHaveBeenCalledExactlyOnceWith(s.account.id, { force: true, refreshPage: true });
+    expect(store.collectJobs.get(job.id)?.state).toBe("done");
+    expect(store.metrics.lastKeepaliveRun(s.account.id)?.status).toBe("success");
+    expect(s.collect).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { state: "unconfirmed" as const, status: "skipped" },
+    { state: "network_error" as const, status: "failed" },
+  ])("retries a $state keepalive slowly with durable backoff instead of the full interval", async ({ state, status }) => {
+    allowed = true;
+    const s = setup("weixin_channels");
+    const settings = { ...store.settings.get(), collectEnabled: false, keepaliveEnabled: true, keepaliveIntervalHours: 12 };
+    scheduler.applySettings(settings);
+    s.checkStatus.mockImplementation(async () => store.accounts.updateCheckInfo(s.account.id, {
+      state, reason: "本次未能确认身份", attemptedAt: new Date().toISOString(),
+    })!);
+    scheduler.enqueue(s.account.id, "keepalive");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(store.metrics.lastKeepaliveRun(s.account.id)?.status).toBe(status);
+    const firstAt = Date.now();
+    vi.setSystemTime(firstAt + 28 * 60_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(s.checkStatus).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.checkStatus).toHaveBeenCalledTimes(2);
+    const secondAt = Date.now();
+    scheduler.stop();
+    scheduler = new CollectScheduler({ store, accounts: s.accounts, pool: s.pool,
+      collectors: { get: () => ({ workingUrl: getPlatform("weixin_channels").routes.home, collect: s.collect }) } as unknown as CollectorRegistry,
+      notify: vi.fn() });
+    scheduler.applySettings(settings);
+    scheduler.start();
+    vi.setSystemTime(secondAt + 57 * 60_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(s.checkStatus).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.checkStatus).toHaveBeenCalledTimes(3);
+    expect(s.collect).not.toHaveBeenCalled();
+  });
+
+  it("does not label an old confirmed check as a new successful keepalive", async () => {
+    allowed = true;
+    const s = setup("weixin_channels");
+    store.accounts.updateCheckInfo(s.account.id, { state: "confirmed", reason: "old identity",
+      attemptedAt: new Date(Date.now() - 60_000).toISOString() });
+    scheduler.enqueue(s.account.id, "keepalive");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(store.metrics.lastKeepaliveRun(s.account.id)?.status).toBe("skipped");
+  });
+
+  it.each([
+    { configuredHours: 2, retryHours: 2 },
+    { configuredHours: 12, retryHours: 6 },
+  ])("caps retry at $retryHours hours, then resets to the configured $configuredHours-hour interval after success", async ({ configuredHours, retryHours }) => {
+    allowed = true;
+    const s = setup("weixin_channels");
+    const settings = { ...store.settings.get(), collectEnabled: false, keepaliveEnabled: true, keepaliveIntervalHours: configuredHours };
+    scheduler.applySettings(settings);
+    for (let index = 0; index < 6; index++) {
+      const id = store.metrics.startRun({ accountId: s.account.id, platformId: "weixin_channels", trigger: "keepalive",
+        status: "skipped", startedAt: new Date(Date.now() - index * 1000).toISOString() });
+      store.metrics.finishRun(id, { status: "skipped", message: "prior unconfirmed", metricsWritten: 0, worksWritten: 0 });
+    }
+    const lastAt = Date.now();
+    s.checkStatus.mockImplementation(async () => store.accounts.updateCheckInfo(s.account.id, {
+      state: "confirmed", reason: "fresh identity", attemptedAt: new Date().toISOString(),
+    })!);
+    vi.setSystemTime(lastAt + (retryHours * 60 - 2) * 60_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(s.checkStatus).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.checkStatus).toHaveBeenCalledOnce();
+    expect(store.metrics.lastKeepaliveRun(s.account.id)?.status).toBe("success");
+    vi.setSystemTime(Date.now() + 60 * 60_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(s.checkStatus).toHaveBeenCalledOnce();
+  });
+
+  it("records a confirmed offline result as failed and stops automatic keepalive for that account", async () => {
+    allowed = true;
+    const s = setup("weixin_channels");
+    scheduler.applySettings({ ...store.settings.get(), collectEnabled: false, keepaliveEnabled: true });
+    s.checkStatus.mockImplementation(async () => {
+      store.accounts.updateStatus(s.account.id, "offline", "账号页面已跳转至登录页");
+      return store.accounts.updateCheckInfo(s.account.id, { state: "confirmed", reason: "账号页面已跳转至登录页",
+        attemptedAt: new Date().toISOString() })!;
+    });
+    scheduler.enqueue(s.account.id, "keepalive");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(store.metrics.lastKeepaliveRun(s.account.id)?.status).toBe("failed");
+    vi.setSystemTime(Date.now() + 13 * 3600_000);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.checkStatus).toHaveBeenCalledOnce();
     expect(s.collect).not.toHaveBeenCalled();
   });
 

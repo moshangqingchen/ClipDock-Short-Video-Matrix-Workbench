@@ -363,6 +363,11 @@ const api: WorkbenchApi = {
     states: () => invoke(IPC.viewStates),
     openDevTools: (id) => invoke(IPC.viewOpenDevTools, id),
   },
+  analytics: {
+    get: (id, days) => invoke(IPC.analyticsGet, id, days),
+    setEnabled: (platform, enabled) => invoke(IPC.analyticsEnable, platform, enabled),
+    readCurrentPage: (id) => invoke(IPC.analyticsReadPage, id),
+  },
   metrics: {
     account: (id, days) => invoke(IPC.metricsAccount, id, days),
     platform: (platformId, days) => invoke(IPC.metricsPlatform, platformId, days),
@@ -370,10 +375,13 @@ const api: WorkbenchApi = {
     collectNow: (id) => invoke(IPC.metricsCollectNow, id),
     jobs: (id) => invoke(IPC.metricsJobs, id),
     cancelJob: (id) => invoke(IPC.metricsCancelJob, id),
+    collectHistory: (id) => invoke(IPC.metricsHistory, id),
+    pauseJob: (id, paused) => invoke(IPC.metricsPauseJob, id, paused),
+    retryJob: (id) => invoke(IPC.metricsRetryJob, id),
     runs: (id, limit) => invoke(IPC.metricsRuns, id, limit),
   },
   works: {
-    list: (id, limit) => invoke(IPC.worksList, id, limit),
+    list: (id, limit, offset) => invoke(IPC.worksList, id, limit, offset),
   },
   assets: {
     list: () => invoke(IPC.assetList),

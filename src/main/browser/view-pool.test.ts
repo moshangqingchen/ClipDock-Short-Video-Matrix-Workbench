@@ -8,6 +8,7 @@ const fixtures = vi.hoisted(() => ({
   contents: [] as any[],
   guards: [] as any[],
   sessions: [] as any[],
+  qrObservers: [] as any[],
   failGuard: false,
 }));
 vi.mock("electron", async () => {
@@ -74,6 +75,14 @@ vi.mock("./cookie-guard", () => ({
 vi.mock("./navigation-policy", () => ({
   installNavigationPolicy: (contents: { navDispose: () => void }) => contents.navDispose,
 }));
+vi.mock("./douyin-qr-observer", () => ({
+  DouyinQrObserver: class {
+    dispose = vi.fn();
+    constructor(_contents: unknown, readonly accountId: string, readonly report: (value: unknown) => void) {
+      fixtures.qrObservers.push(this);
+    }
+  },
+}));
 
 import { ViewPool } from "./view-pool";
 
@@ -94,6 +103,7 @@ describe("ViewPool ownership through actual destruction", () => {
     fixtures.contents.length = 0;
     fixtures.guards.length = 0;
     fixtures.sessions.length = 0;
+    fixtures.qrObservers.length = 0;
     fixtures.failGuard = false;
     restoreController = installBusinessNetwork({
       enforcement: "observe",
@@ -121,6 +131,23 @@ describe("ViewPool ownership through actual destruction", () => {
     return { pool, create };
   }
 
+  it("only attaches QR diagnostics to Douyin, without turning observations into account activity", async () => {
+    const onActivity = vi.fn(), onQrDiagnostic = vi.fn();
+    const pool = new ViewPool({ maxLive: 2, onActivity, onQrDiagnostic,
+      window: { contentView: { addChildView: vi.fn(), removeChildView: vi.fn() } } as never });
+    pools.push(pool);
+    pool.ensure({ id: "douyin", platformId: "douyin" }, { navigate: false });
+    pool.ensure({ id: "bilibili", platformId: "bilibili" }, { navigate: false });
+    expect(fixtures.qrObservers).toHaveLength(1);
+    fixtures.qrObservers[0].report({ stage: "get", httpStatus: 429 });
+    expect(onQrDiagnostic).toHaveBeenCalledExactlyOnceWith("douyin", { stage: "get", httpStatus: 429 });
+    expect(onActivity).not.toHaveBeenCalled();
+    const closed = pool.suspendNetworkAccount("douyin");
+    expect(fixtures.qrObservers[0].dispose).toHaveBeenCalled();
+    fixtures.contents[0].destroy();
+    await closed;
+  });
+
   it.each(PLATFORM_LIST)("opens $id at its default foreground homepage without first loading management", async (platform) => {
     const f = fixture();
     const state = await f.pool.show(
@@ -134,7 +161,7 @@ describe("ViewPool ownership through actual destruction", () => {
     expect(fixtures.contents[0].loadURL).toHaveBeenCalledExactlyOnceWith(expected);
   });
 
-  it("re-enters the homepage while restoring a modal keeps the selected management page", async () => {
+  it("restores the current page on repeated account entry and still honors explicit navigation", async () => {
     const f = fixture();
     const wc = f.create("one");
     const bounds = { x: 0, y: 0, width: 640, height: 480 };
@@ -143,8 +170,56 @@ describe("ViewPool ownership through actual destruction", () => {
     await f.pool.show(account("one"), bounds, false);
     expect(wc.loadURL).toHaveBeenCalledExactlyOnceWith(platform.routes.home);
     await f.pool.show(account("one"), bounds, true);
+    expect(wc.loadURL).toHaveBeenCalledExactlyOnceWith(platform.routes.home);
+    await f.pool.navigate("one", platform.routes.site!);
+    expect(wc.loadURL).toHaveBeenCalledTimes(2);
     expect(wc.loadURL).toHaveBeenLastCalledWith(platform.routes.site);
     expect(fixtures.contents).toHaveLength(1);
+  });
+
+  it("switches away and back without reloading a public homepage QR dialog", async () => {
+    const f = fixture();
+    const bounds = { x: 0, y: 0, width: 640, height: 480 };
+    const first = { id: "first", platformId: "douyin" as const };
+    await f.pool.show(first, bounds, true);
+    const wc = fixtures.contents[0];
+    await f.pool.show(account("second"), bounds, true);
+    await f.pool.show(first, bounds, true);
+    expect(f.pool.getWebContents("first")).toBe(wc);
+    expect(wc.loadURL).toHaveBeenCalledExactlyOnceWith(getPlatform("douyin").routes.site);
+    expect(f.pool.getState("first")?.visible).toBe(true);
+    expect(f.pool.getState("second")?.visible).toBe(false);
+  });
+
+  it("does not issue another homepage request while the first entry is still loading", async () => {
+    const f = fixture();
+    const wc = f.create("one");
+    let complete!: () => void;
+    wc.loadURL.mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }));
+    const bounds = { x: 0, y: 0, width: 640, height: 480 };
+    await f.pool.show(account("one"), bounds, true);
+    await f.pool.show(account("one"), bounds, true);
+    expect(wc.loadURL).toHaveBeenCalledOnce();
+    complete();
+  });
+
+  it("briefly protects a hidden homepage QR dialog, then evicts it without a background ensure renewing the grace", async () => {
+    const f = fixture();
+    const bounds = { x: 0, y: 0, width: 640, height: 480 };
+    await f.pool.show(account("first"), bounds, true);
+    const first = fixtures.contents[0];
+    await f.pool.show(account("second"), bounds, true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    f.pool.ensure(account("first"));
+    await f.pool.show(account("third"), bounds, true);
+    expect(f.pool.listStates()).toHaveLength(3);
+    expect(first.close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(first.close).toHaveBeenCalledExactlyOnceWith({ waitForBeforeUnload: false });
+    expect(f.pool.has("first")).toBe(false);
+    expect(f.pool.has("second")).toBe(true);
+    expect(f.pool.getState("third")?.visible).toBe(true);
+    expect(f.pool.listStates()).toHaveLength(2);
   });
 
   it("claims the foreground before a slow homepage load and leaves management navigation responsive", async () => {

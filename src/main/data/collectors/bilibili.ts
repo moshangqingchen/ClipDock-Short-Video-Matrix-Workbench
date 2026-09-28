@@ -3,7 +3,6 @@ import { PLATFORMS } from "@shared/platforms";
 import {
   LoggedOutError,
   emptyResult,
-  firstDefined,
   firstJson,
   firstUrl,
   makeWork,
@@ -12,6 +11,8 @@ import {
   toIso,
   toNumber,
   worksToMetrics,
+  worksJson,
+  recordWorksPage,
   type Collector,
   type CollectorContext,
   type CollectorProfile,
@@ -54,16 +55,17 @@ async function readProfile(ctx: CollectorContext): Promise<CollectorProfile | nu
 }
 
 async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work[] | null> {
-  const json = await firstJson(
-    ctx.webContents,
+  const json = await worksJson(
+    ctx,
     [
-      { url: `${MEMBER}/x/web/archives?status=is_pubing,pubed,not_pubed&pn=1&ps=30&coop=1&interactive=1` },
-      { url: `${MEMBER}/x/web/archives?status=pubed&pn=1&ps=30` },
+      { url: `${MEMBER}/x/web/archives?status=is_pubing,pubed,not_pubed&pn=${ctx.progress?.page ?? 1}&ps=30&coop=1&interactive=1` },
+      { url: `${MEMBER}/x/web/archives?status=pubed&pn=${ctx.progress?.page ?? 1}&ps=30` },
     ],
     (j) => pick(j, "code") === 0 && Array.isArray(pick(j, "data.arc_audits")),
   );
   if (!json) return null;
   const list = pick(json, "data.arc_audits") as any[];
+  recordWorksPage(ctx, json, list, "page", []);
   return list
     .map((item) => {
       const archive = item.Archive ?? item.archive ?? {};
@@ -79,11 +81,11 @@ async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work
           url: `https://www.bilibili.com/video/${remoteId}`,
           publishedAt: toIso(archive.ptime ?? archive.ctime),
           status: String(archive.state_desc ?? archive.state ?? "") || null,
-          plays: toNumber(stat.view) ?? 0,
-          likes: toNumber(stat.like) ?? 0,
-          comments: toNumber(stat.reply) ?? 0,
-          shares: toNumber(stat.share) ?? 0,
-          favorites: toNumber(stat.favorite) ?? 0,
+          plays: toNumber(stat.view),
+          likes: toNumber(stat.like),
+          comments: toNumber(stat.reply),
+          shares: toNumber(stat.share),
+          favorites: toNumber(stat.favorite),
         },
         fetchedAt,
       );
@@ -97,7 +99,7 @@ export const bilibiliCollector: Collector = {
 
   async fetchProfile(ctx) {
     try {
-      return await readProfile(ctx);
+      return ctx.skipProfile ? null : await readProfile(ctx);
     } catch (error) {
       if (error instanceof LoggedOutError) return null;
       throw error;
@@ -109,7 +111,7 @@ export const bilibiliCollector: Collector = {
     const capturedAt = new Date().toISOString();
     let profile: CollectorProfile | null;
     try {
-      profile = await readProfile(ctx);
+      profile = ctx.skipProfile ? null : await readProfile(ctx);
     } catch (error) {
       if (error instanceof LoggedOutError) {
         result.loggedOut = true;
@@ -117,21 +119,14 @@ export const bilibiliCollector: Collector = {
       }
       throw error;
     }
-    if (!profile) result.warnings.push("无法读取账号概览");
+    if (!ctx.skipProfile && !profile) result.warnings.push("无法读取账号概览");
     const fetchedWorks = await readWorks(ctx, capturedAt);
     if (fetchedWorks === null) result.warnings.push("作品接口不可用");
     const works = fetchedWorks ?? [];
-    if (profile) {
-      profile = {
-        ...profile,
-        works: profile.works ?? toNumber(firstDefined(works, ["length"])) ?? null,
-        comments: works.reduce((s, w) => s + w.comments, 0),
-        shares: works.reduce((s, w) => s + w.shares, 0),
-        favorites: works.reduce((s, w) => s + w.favorites, 0),
-      };
-    }
     result.profile = profile;
     result.works = works;
+    result.page = ctx.pageResult;
+    if (result.page?.hasMore === null) result.warnings.push(result.page.reason ?? "分页范围未确认");
     result.metrics = [
       ...(profile ? profileToMetrics(ctx.account, profile, capturedAt) : []),
       ...worksToMetrics(works, capturedAt),

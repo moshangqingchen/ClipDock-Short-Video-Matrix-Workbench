@@ -195,18 +195,18 @@ export class AccountService extends EventEmitter {
   async showView(id: string, bounds: ViewBounds, enterHomepage = false): Promise<ViewState> {
     const account = this.get(id);
     this.assertSessionAvailable(id);
-    const currentUrl = this.options.viewPool.getState(id)?.url;
+    const currentPage = this.options.viewPool.getState(id);
+    const currentUrl = currentPage?.url;
     const entryUrl = platformEntryUrl(account.platformId);
-    const currentHomepage = isHomepageContext(account.platformId, currentUrl ?? "");
+    const restoreCurrent = Boolean(businessPageOrigin(currentUrl) &&
+      currentPage?.lifecycle !== "crashed" && currentPage?.lifecycle !== "destroyed");
+    const targetUrl = restoreCurrent ? currentUrl! : enterHomepage ? entryUrl : getPlatform(account.platformId).routes.home;
     this.prepareNetworkOperation(
       id,
-      enterHomepage || currentHomepage ? "view-navigate" : businessPageOrigin(currentUrl) ? "check-status" : "view-home",
-      enterHomepage ? entryUrl : currentHomepage ? currentUrl : undefined,
+      enterHomepage || restoreCurrent ? "view-navigate" : "view-home",
+      enterHomepage || restoreCurrent ? targetUrl : undefined,
     );
-    assertBusinessNetwork(
-      id,
-      enterHomepage ? entryUrl : businessPageOrigin(currentUrl) ? currentUrl : getPlatform(account.platformId).routes.home,
-    );
+    assertBusinessNetwork(id, targetUrl);
     const state = await this.options.viewPool.show(
       { id: account.id, platformId: account.platformId },
       bounds,
@@ -395,11 +395,7 @@ export class AccountService extends EventEmitter {
     const initialPage = this.options.viewPool.getState(accountId);
     // Never replace an active editor, QR login or verification page in the background.
     const refreshPage = opts.refreshPage && account.platformId === "weixin_channels" &&
-      (!initialPage?.visible || Boolean(initialPage.lastError)) && !initialPage?.loading &&
-      (!initialPage?.url || initialPage.url === "about:blank" || Boolean(initialPage.lastError) ||
-        initialPage.url === getPlatform(account.platformId).routes.home) &&
-      !isVerificationUrl(account.platformId, initialPage?.url ?? "") &&
-      (!isLoginUrl(account.platformId, initialPage?.url ?? "") || Boolean(initialPage?.lastError));
+      canRefreshChannelsPage(initialPage);
     try {
       if (refreshPage) this.prepareNetworkOperation(accountId, "view-home");
       else this.prepareCheckNetwork(accountId, account.platformId);
@@ -521,7 +517,13 @@ export class AccountService extends EventEmitter {
         this.options.store.audit.append({
           action: "account.status",
           accountId,
-          details: { from: previous, to: result.status, probe: result.probeStatus ?? null },
+          details: {
+            from: previous, to: result.status, probe: result.probeStatus ?? null,
+            reason: result.message,
+            source: result.source ?? (result.status === "needs_verification" ? "verification-page"
+              : result.evidenceKey ? "identity-response"
+              : viewState?.url && isLoginUrl(account.platformId, viewState.url) ? "login-page" : "probe"),
+          },
         });
         if (!opts.silent) this.notifyTransition(updated, previous);
         if (
@@ -797,6 +799,21 @@ export class AccountService extends EventEmitter {
     this.recoveryTimers.clear();
     this.recoveryPending.clear();
   }
+}
+
+/** Only read-only management routes may be revisited in a hidden Channels view. */
+function canRefreshChannelsPage(page: ViewState | null): boolean {
+  if (page?.visible || page?.loading) return false;
+  if (!page?.url || page.url === "about:blank") return true;
+  if (isLoginUrl("weixin_channels", page.url) || isVerificationUrl("weixin_channels", page.url)) return false;
+  try {
+    const url = new URL(page.url);
+    const routes = getPlatform("weixin_channels").routes;
+    return url.protocol === "https:" && !url.username && !url.password && !url.port &&
+      url.origin === new URL(routes.home).origin &&
+      [routes.home, routes.works, routes.analytics, routes.comments]
+        .some((route) => route && new URL(route).pathname === url.pathname.replace(/\/$/, ""));
+  } catch { return false; }
 }
 
 function isGeneratedName(account: Account): boolean {

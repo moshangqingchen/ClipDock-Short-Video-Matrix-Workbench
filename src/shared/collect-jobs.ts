@@ -9,7 +9,27 @@ export const COLLECT_JOB_STATES = [
   "cancelled",
 ] as const;
 export type CollectJobState = (typeof COLLECT_JOB_STATES)[number];
+export interface CollectionProgress {
+  scope: "recent" | "history" | "analytics";
+  page: number;
+  cursor: string;
+  variant?: number;
+  pagesDone: number;
+  worksSeen: number;
+  total?: number;
+  fingerprints: string[];
+  complete: boolean;
+  reason?: string;
+  cutoff: string | null;
+}
+export function initialProgress(scope: CollectionProgress["scope"] = "recent"): CollectionProgress {
+  return { scope, page: 1, cursor: "", pagesDone: 0, worksSeen: 0, fingerprints: [], complete: false,
+    cutoff: scope === "recent" ? new Date(Date.now() - 30 * 86400_000).toISOString() : null };
+}
 export interface CollectJob {
+  progress?: CollectionProgress;
+  notBefore?: number;
+  paused?: boolean;
   id: string;
   accountId: string;
   trigger: CollectRun["trigger"];

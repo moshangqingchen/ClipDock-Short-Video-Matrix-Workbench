@@ -2,6 +2,7 @@ import { app, dialog, type BaseWindow } from "electron";
 import path from "node:path";
 import { IPC, backupExportSchema, backupImportSchema, type BackupImportResult } from "@shared/ipc";
 import type { Store } from "@main/db";
+import { createRecoveryPoint } from "@main/db/database";
 import type { ViewPool } from "@main/browser/view-pool";
 import type { AccountService } from "@main/services/account-service";
 import {
@@ -57,6 +58,7 @@ export function registerBackupHandlers(ipc: IpcRegistrar, deps: BackupHandlerDep
       assertBackupAccountIdentities(deps.store, payload);
       assertBackupAccountCapacity(deps.store, payload, options.mode);
       deps.validateAccountIdentities?.(payload.accounts);
+      createRecoveryPoint(deps.store.db, "restore");
       if (options.mode === "replace") {
         // Views of accounts about to disappear must be torn down first; their
         // partitions are left untouched so re-adding the same id logs back in.

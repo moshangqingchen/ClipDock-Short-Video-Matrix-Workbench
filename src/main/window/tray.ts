@@ -1,5 +1,5 @@
 import { app, BaseWindow, Menu, nativeImage, Tray, type Event } from "electron";
-import { trayIconPng } from "./tray-icon";
+import { appIconPng } from "./app-icon";
 
 export interface WorkbenchTray {
   show(): void;
@@ -11,7 +11,7 @@ export function createWorkbenchTray(
   window: BaseWindow,
   options: { isQuitting(): boolean; quit(): void },
 ): WorkbenchTray {
-  const tray = new Tray(nativeImage.createFromBuffer(Buffer.from(trayIconPng, "base64")));
+  const tray = new Tray(nativeImage.createFromBuffer(Buffer.from(appIconPng, "base64")));
   let disposed = false;
   let sessionEnding = false;
   let explained = false;

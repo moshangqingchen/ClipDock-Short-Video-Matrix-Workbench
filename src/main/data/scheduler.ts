@@ -1,8 +1,10 @@
 import type { WebContents } from "electron";
-import { setTimeout as wait } from "node:timers/promises";
 import type { Account, AppSettings, CollectRun } from "@shared/types";
-import type { CollectJob } from "@shared/collect-jobs";
-import { isLoginUrl, isVerificationUrl } from "@shared/platforms";
+import { initialProgress, type CollectionProgress, type CollectJob } from "@shared/collect-jobs";
+import { createHash } from "node:crypto";
+import { isLoginUrl, isVerificationUrl, getPlatform } from "@shared/platforms";
+import type { BusinessAnalyticsService } from "./business-analytics-service";
+import { analyticsPageAllowed } from "./business-analytics-page";
 import type { ToastEvent } from "@shared/ipc";
 import type { Store } from "@main/db";
 import type { ViewPool } from "@main/browser/view-pool";
@@ -20,6 +22,7 @@ import {
 import { LoggedOutError, RateLimitedError, type CollectorRegistry } from "./collectors";
 
 export interface SchedulerOptions {
+  analytics?: BusinessAnalyticsService;
   store: Store;
   pool: ViewPool;
   collectors: CollectorRegistry;
@@ -39,11 +42,23 @@ interface ActiveRun {
 const MAX_CONCURRENCY = 2;
 const PAGE_READY_TIMEOUT_MS = 25_000;
 const MIN_GAP_BETWEEN_RUNS_MS = 90_000;
+const KEEPALIVE_RETRY_BASE_MS = 30 * 60_000;
+const KEEPALIVE_RETRY_MAX_MS = 6 * 3600_000;
 const BACKOFF_BASE_MS = 10 * 60_000;
 const BACKOFF_MAX_MS = 6 * 3600_000;
 const eligible = (account: Account) => account.status === "online" || account.status === "expiring";
 class JobCancelledError extends Error {}
 class IdentityNotReadyError extends Error {}
+class CollectionContextChangedError extends Error {}
+function wait(milliseconds: number, _value?: undefined, options?: { signal?: AbortSignal }): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const signal = options?.signal;
+    if (signal?.aborted) { reject(signal.reason); return; }
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, milliseconds);
+    const abort = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); reject(signal?.reason); };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
 
 /** Durable data-only queue. Network permits are never persisted with a task. */
 export class CollectScheduler {
@@ -127,7 +142,7 @@ export class CollectScheduler {
   private shouldSkipHomepage(account: Account, trigger: Trigger): boolean {
     if (trigger === "manual") return false;
     const page = this.options.pool.getState(account.id);
-    return Boolean(page?.visible && isHomepageContext(account.platformId, page.url));
+    return Boolean(page?.visible && (isHomepageContext(account.platformId, page.url) || /(?:upload|publish|(?:^|[/_-])edit(?:or)?(?:[/?#_-]|$)|\/post\/create)/i.test(page.url)));
   }
 
   /** Complete a local skip before a background job can expand the homepage's network scope. */
@@ -139,7 +154,7 @@ export class CollectScheduler {
   }
 
   /** Accept immediately. Repeated buttons/ticks reuse the same active task ID. */
-  enqueue(accountId: string, trigger: Trigger): CollectJob {
+  enqueue(accountId: string, trigger: Trigger, scope: CollectionProgress["scope"] = "recent"): CollectJob {
     const { store } = this.options;
     const account = store.accounts.get(accountId);
     if (!account) throw new Error("国内账号不存在");
@@ -153,7 +168,7 @@ export class CollectScheduler {
       this.prepareRequiredOperation(accountId, trigger);
     const waiting =
       !skipHomepage && (!prepared || this.suspended.has(accountId) || !canUseBusinessNetwork(accountId, workingUrl));
-    let job = store.collectJobs.enqueue(accountId, trigger, waiting);
+    let job = store.collectJobs.enqueue(accountId, trigger, waiting, scope);
     if (!eligible(account) && job.state !== "running") {
       job =
         store.collectJobs.transition(
@@ -171,6 +186,26 @@ export class CollectScheduler {
   }
   collectAll(trigger: Trigger): CollectJob[] {
     return this.options.accounts.list().map((a) => this.enqueue(a.id, trigger));
+  }
+  pauseJob(id: string, paused: boolean): CollectJob | null {
+    const job = this.options.store.collectJobs.pause(id, paused);
+    if (paused && job) this.running.get(job.accountId)?.abort.abort();
+    this.changed(job);
+    if (!paused) queueMicrotask(() => this.pump());
+    return job;
+  }
+  retryJob(id: string): CollectJob | null {
+    const job = this.options.store.collectJobs.get(id);
+    if (!job || job.state !== "failed") return job;
+    const active = this.options.store.collectJobs.list(job.accountId, true, 1)[0];
+    if (active) return active;
+    const account = this.options.store.accounts.get(job.accountId);
+    if (!account || !eligible(account)) throw new Error("请先完成账号登录");
+    this.options.store.collectJobs.recheckCursor(id);
+    const next = this.options.store.collectJobs.transition(id, ["failed"], "queued", "从已保存进度重试");
+    this.changed(next);
+    queueMicrotask(() => this.pump());
+    return next;
   }
   cancelJob(id: string): CollectJob | null {
     const job = this.options.store.collectJobs.cancel(id);
@@ -260,6 +295,16 @@ export class CollectScheduler {
       const last = this.options.store.metrics.lastAttemptedRun(account.id);
       const lastAt = last ? Date.parse(last.finishedAt ?? last.startedAt) : 0;
       if (this.settings.collectEnabled) {
+        if (last && this.options.analytics?.enabled(account.platformId) && this.options.analytics.due(account.id)) {
+          this.enqueue(account.id, "scheduled", "analytics");
+          continue;
+        }
+        const historyAt = this.options.store.collectJobs.lastHistoryAt(account.id);
+        const historyAttempt = this.options.store.collectJobs.lastHistoryAttemptAt(account.id) ?? historyAt;
+        if (historyAt && historyAttempt && now - Date.parse(historyAttempt) >= 7 * 86400_000) {
+          this.enqueue(account.id, "scheduled", "history");
+          continue;
+        }
         const interval = this.settings.collectIntervalHours * 3600_000;
         if (!last || now - lastAt >= interval + hashJitter(account.id, interval * 0.15)) {
           this.enqueue(account.id, !last && initial ? "login" : "scheduled");
@@ -267,9 +312,19 @@ export class CollectScheduler {
         }
       }
       if (this.settings.keepaliveEnabled) {
-        const attemptedAt = this.options.store.metrics.lastKeepaliveRun(account.id)?.startedAt ?? account.createdAt;
+        const history = this.options.store.metrics.recentKeepaliveRuns(account.id);
+        const latest = history[0];
+        const attemptedAt = latest?.finishedAt ?? latest?.startedAt ?? account.createdAt;
         const since = attemptedAt ? now - Date.parse(attemptedAt) : Infinity;
-        if (since >= this.settings.keepaliveIntervalHours * 3600_000) this.enqueue(account.id, "keepalive");
+        const firstSuccess = history.findIndex((run) => run.status === "success");
+        const unsuccessful = firstSuccess < 0 ? history.length : firstSuccess;
+        // A deferred/unconfirmed check is not a successful keepalive. Retry slowly,
+        // with a durable capped backoff instead of silently consuming the full interval.
+        const interval = !latest || latest.status === "success"
+          ? this.settings.keepaliveIntervalHours * 3600_000
+          : Math.min(this.settings.keepaliveIntervalHours * 3600_000,
+            KEEPALIVE_RETRY_MAX_MS, KEEPALIVE_RETRY_BASE_MS * 2 ** Math.max(0, unsuccessful - 1));
+        if (since >= interval) this.enqueue(account.id, "keepalive");
       }
     }
     this.pump();
@@ -279,8 +334,10 @@ export class CollectScheduler {
     const { store } = this.options;
     for (const job of store.collectJobs.list(undefined, true)) {
       if (this.running.size >= MAX_CONCURRENCY) return;
-      if (job.state !== "queued" || this.running.has(job.accountId)) continue;
+      if (job.state !== "queued" || job.paused || (job.notBefore ?? 0) > Date.now() || this.running.has(job.accountId)) continue;
       const account = store.accounts.get(job.accountId);
+      if (account && [...this.running.keys()].some((id) => store.accounts.get(id)?.platformId === account.platformId)) continue;
+      if (account && Number(store.db.get("SELECT not_before FROM collection_platform_backoff WHERE platform_id=?", [account.platformId])?.not_before ?? 0) > Date.now()) continue;
       if (!account || !eligible(account)) {
         this.changed(
           store.collectJobs.transition(
@@ -317,7 +374,7 @@ export class CollectScheduler {
   private assertCurrent(job: CollectJob, active: ActiveRun, lease: BusinessOperation): void {
     if (this.stopped) throw new NetworkDormantError("GATE_REVOKED");
     const current = this.options.store.collectJobs.get(job.id);
-    if (!current || current.state === "cancelled") throw new JobCancelledError();
+    if (!current || current.state === "cancelled" || current.paused) throw new JobCancelledError();
     if (this.suspended.has(job.accountId) || current.state !== "running")
       throw new NetworkDormantError("GATE_REVOKED");
     lease.assertCurrent();
@@ -331,24 +388,32 @@ export class CollectScheduler {
     if (!account) return;
     let lease: BusinessOperation | undefined;
     let collectionIsCurrent: (() => boolean) | undefined;
+    let metricsWrittenTotal = 0;
+    let worksWrittenTotal = 0;
+    const deadline = new AbortController();
+    const deadlineTimer = setTimeout(() => deadline.abort(), 180_000);
     const startedAt = new Date().toISOString();
     try {
       const collector = collectors.get(account.platformId);
       lease = beginBusinessOperation(account.id, collector?.workingUrl);
       const check = () => this.assertCurrent(job, active, lease!);
-      const signal = AbortSignal.any([lease.signal, active.abort.signal]);
+      const signal = AbortSignal.any([lease.signal, active.abort.signal, deadline.signal]);
       check();
       const immediate = job.trigger === "manual" || job.trigger === "login";
       if (!collector) {
         this.finish(job, startedAt, "skipped", "该平台暂不支持采集");
         return;
       }
-      if ((this.backoffUntil.get(account.id) ?? 0) > Date.now() && job.trigger !== "manual") {
-        this.finish(job, startedAt, "skipped", "平台限流退避中");
+      if ((this.backoffUntil.get(account.id) ?? 0) > Date.now()) {
+        this.changed(store.collectJobs.defer(job.id, this.backoffUntil.get(account.id)!, "平台限流退避中"));
         return;
       }
-      if (!immediate && Date.now() - (this.lastRunAt.get(account.id) ?? 0) < MIN_GAP_BETWEEN_RUNS_MS) {
-        this.finish(job, startedAt, "skipped", "距上次采集过近");
+      if (!immediate && !(job.progress?.pagesDone) && Date.now() - (this.lastRunAt.get(account.id) ?? 0) < MIN_GAP_BETWEEN_RUNS_MS) {
+        if (job.trigger === "keepalive") {
+          this.changed(store.collectJobs.defer(job.id,
+            this.lastRunAt.get(account.id)! + MIN_GAP_BETWEEN_RUNS_MS,
+            "等待上次任务冷却后检查登录状态"));
+        } else this.finish(job, startedAt, "skipped", "距上次采集过近");
         return;
       }
       if (job.trigger === "keepalive") {
@@ -358,21 +423,35 @@ export class CollectScheduler {
         if (this.stopped || active.abort.signal.aborted || store.collectJobs.get(job.id)?.state !== "running")
           return;
         this.lastRunAt.set(account.id, Date.now());
+        const fresh = Boolean(checked.checkInfo?.attemptedAt && Date.parse(checked.checkInfo.attemptedAt) >= Date.parse(startedAt));
+        const outcome = fresh && checked.checkInfo?.state === "confirmed"
+          ? eligible(checked) ? "success" : "failed"
+          : fresh && checked.checkInfo?.state === "network_error" ? "failed" : "skipped";
         this.finish(
           job,
           startedAt,
-          checked.checkInfo?.state === "confirmed" ? "success" : "skipped",
+          outcome,
           checked.checkInfo?.reason ?? "轻量身份检查完成",
         );
         return;
       }
+      if (job.progress?.scope === "analytics") this.options.analytics?.attempt(account.id);
       const wc = await withBusinessTaskSignal(signal, () =>
-        this.prepareView(account, collector.workingUrl, false, signal, check),
+        this.prepareView(account, job.progress?.scope === "analytics" ? getPlatform(account.platformId).routes.analytics : collector.workingUrl,
+          job.progress?.scope === "analytics" ? !analyticsPageAllowed(account.platformId, this.options.pool.getState(account.id)?.url ?? "") :
+            account.platformId === "weixin_channels" && Boolean(this.options.pool.getWorksRequest) && !this.options.pool.getWorksRequest?.(account.id), signal, check),
       );
       check();
       if (!wc) {
+        if (job.progress?.scope === "analytics") this.options.analytics?.defer(account.id);
         this.finish(job, startedAt, "skipped", "请打开账号管理页后采集，当前页面和账号资料已保留");
         if (job.trigger === "login") this.retryAfterLogin(account.id);
+        return;
+      }
+      if (job.progress?.scope === "analytics") {
+        const written = await withBusinessTaskSignal(signal, () => this.options.analytics!.collect(account.id, wc, check));
+        check();
+        this.finish(job, startedAt, written ? "partial" : "skipped", "已读取官方页面当前统计区间；历史覆盖范围见经营分析", written);
         return;
       }
       // Reusing an old console does not produce a fresh auth_data response.
@@ -413,71 +492,100 @@ export class CollectScheduler {
         );
       };
       this.mediaRefreshAttempted.add(account.id);
-      const result = await withBusinessTaskSignal(signal, () =>
-        collector.collect({
-          webContents: wc,
-          account,
+      const warnings = new Set<string>();
+      let progress = store.collectJobs.get(job.id)?.progress ?? initialProgress();
+      let further = false;
+      let incomplete = false;
+      for (let batchPage = 0; batchPage < 5; batchPage++) {
+        check();
+        signal.throwIfAborted();
+        const result = await withBusinessTaskSignal(signal, () => collector.collect({
+          webContents: wc, account, progress,
+          skipProfile: batchPage > 0 || progress.pagesDone > 0,
           identityProfile: this.options.pool.getIdentityEvidence?.(account.id)?.profile,
-        }),
-      );
-      check();
-      if (!collectionIsCurrent()) {
-        this.finish(job, startedAt, "skipped", "采集期间页面或登录身份已变化，已保留原账号资料");
-        return;
-      }
-      if (result.loggedOut) {
-        await withBusinessTaskSignal(signal, () => accounts.checkStatus(account.id));
-        lease.assertCurrent();
-        if (this.stopped || store.collectJobs.get(job.id)?.state !== "running" || active.abort.signal.aborted)
-          return;
-        this.finish(job, startedAt, "skipped", "平台提示未登录");
-        return;
-      }
-      const run = store.db.transaction(() => {
+          observedWorksRequest: () => this.options.pool.getWorksRequest?.(account.id) ?? null,
+        }));
         check();
-        const metricsWritten = store.metrics.saveSnapshots(result.metrics);
-        const worksWritten = store.metrics.upsertWorks(
-          result.works.map((work) => ({ ...work, coverUrl: persistableMediaReference(work.coverUrl) })),
-        );
-        if (result.profile) {
-          const patch = profilePatch(store.accounts.get(account.id)!, result.profile);
-          if (Object.keys(patch).length) accounts.update(account.id, patch);
+        signal.throwIfAborted();
+        if (!collectionIsCurrent()) throw new CollectionContextChangedError();
+        if (result.loggedOut) throw new LoggedOutError();
+        // A full-history request can join while this page is awaiting its response.
+        if (store.collectJobs.get(job.id)?.progress?.scope === "history") {
+          progress = { ...progress, scope: "history", cutoff: null };
         }
-        check();
-        const status = metricsWritten === 0 ? "failed" : result.warnings.length ? "partial" : "success";
-        return this.finish(
-          job,
-          startedAt,
-          status,
-          result.warnings.join(";") || null,
-          metricsWritten,
-          worksWritten,
-          false,
-        );
-      });
-      // Submit optional previews only after the collection transaction commits and its lease is current.
-      lease.assertCurrent();
-      if (result.profile?.avatarUrl) this.options.mediaIntake?.avatar(account.id, result.profile.avatarUrl);
-      this.options.mediaIntake?.covers(account.id, result.works);
+        for (const warning of result.warnings) warnings.add(warning);
+        const fingerprint = createHash("sha256").update(result.works.map((work) => work.remoteId).sort().join("\n")).digest("hex");
+        if (result.works.length && progress.fingerprints.includes(fingerprint)) {
+          warnings.add("平台返回重复页，已停止翻页；进度保留，可重新核对");
+          progress.reason = "平台返回重复页，重试将从第一页重新核对，已采作品保留";
+          store.collectJobs.checkpoint(job.id, progress);
+          further = false;
+          incomplete = true;
+          break;
+        }
+        const page = result.page;
+        if (page?.receivedCount != null && page.receivedCount !== result.works.length) {
+          page.hasMore = null;
+          page.reason = "部分作品标识未能识别，已保存可识别作品，请重新核对平台字段";
+        }
+        const recentDone = progress.cutoff && result.works.length > 0 &&
+          result.works.every((work) => work.publishedAt && work.publishedAt < progress.cutoff!);
+        const complete = Boolean(page && (page.hasMore === false || recentDone));
+        further = Boolean(page?.hasMore === true && !complete);
+        incomplete = !page || page.hasMore === null;
+        const next: CollectionProgress = {
+          ...progress, page: page?.hasMore == null ? progress.page : page.nextPage,
+          cursor: page?.hasMore == null ? progress.cursor : page.nextCursor,
+          variant: page?.variant ?? progress.variant, pagesDone: progress.pagesDone + (page ? 1 : 0),
+          worksSeen: progress.worksSeen + result.works.length, total: page?.total ?? progress.total,
+          fingerprints: result.works.length && page?.hasMore != null ? [...progress.fingerprints, fingerprint] : progress.fingerprints,
+          complete, reason: incomplete ? page?.reason ?? "作品分页信息未就绪" : undefined,
+        };
+        const written = store.db.transaction(() => {
+          check();
+          if (!collectionIsCurrent!()) throw new CollectionContextChangedError();
+          const metrics = store.metrics.saveSnapshots(result.metrics);
+          const works = store.metrics.upsertWorks(result.works.map((work) => ({ ...work, coverUrl: persistableMediaReference(work.coverUrl) })));
+          let newlySeen = 0;
+          for (const work of result.works) newlySeen += store.db.run("INSERT OR IGNORE INTO collection_seen(job_id,remote_id) VALUES(?,?)", [job.id, work.remoteId]).changes;
+          next.worksSeen = progress.worksSeen + newlySeen;
+          if (result.profile) {
+            const patch = profilePatch(store.accounts.get(account.id)!, result.profile);
+            if (Object.keys(patch).length) accounts.update(account.id, patch);
+          }
+          store.collectJobs.checkpoint(job.id, next);
+          check();
+          return { metrics, works };
+        });
+        metricsWrittenTotal += written.metrics;
+        worksWrittenTotal += written.works;
+        progress = next;
+        this.changed(store.collectJobs.get(job.id));
+        if (written.metrics || written.works) this.options.onMetrics?.(account.id);
+        lease.assertCurrent();
+        if (result.profile?.avatarUrl) this.options.mediaIntake?.avatar(account.id, result.profile.avatarUrl);
+        this.options.mediaIntake?.covers(account.id, result.works);
+        if (!further) break;
+        if (batchPage < 4) await wait(2_000 + Math.floor(Math.random() * 3_001), undefined, { signal });
+      }
       this.lastRunAt.set(account.id, Date.now());
       this.loginRetries.delete(account.id);
       this.backoffLevel.delete(account.id);
       this.backoffUntil.delete(account.id);
-      this.options.onRun?.(run);
-      this.changed(store.collectJobs.get(job.id));
-      if (run.metricsWritten > 0) this.options.onMetrics?.(account.id);
-      if ((store.collectJobs.get(job.id)?.trigger ?? job.trigger) === "manual")
-        notify({
-          kind: run.status === "failed" ? "warning" : "success",
-          title:
-            run.status === "failed"
-              ? account.displayName + " 采集未获取到数据"
-              : account.displayName + " 数据已更新",
-          accountId: account.id,
-        });
+      const hasData = metricsWrittenTotal > 0 || worksWrittenTotal > 0;
+      if (incomplete) warnings.add(progress.reason ?? "作品范围未确认，已保留本次取得的数据");
+      const status = !hasData && !progress.complete ? "failed" : warnings.size || further ? "partial" : "success";
+      this.finish(job, startedAt, status, [...warnings].join("；") || null,
+        metricsWrittenTotal, worksWrittenTotal, true, further ? "continue" : incomplete && progress.scope === "history" ? "incomplete" : undefined);
+      if (job.trigger === "manual" && !further) notify({
+        kind: status === "success" ? "success" : "warning",
+        title: account.displayName + (status === "success" ? " 数据已更新" : hasData ? " 部分数据已更新" : " 采集未获取到数据"),
+        message: [...warnings].join("；") || undefined, accountId: account.id,
+      });
     } catch (error) {
       if (this.stopped) return;
       const current = store.collectJobs.get(job.id);
+      if (current?.paused) return;
       if (!current || current.state === "cancelled" || current.state === "done" || current.state === "failed")
         return;
       if (
@@ -502,12 +610,13 @@ export class CollectScheduler {
         return;
       }
       let message = "采集未完成，请稍后重试";
+      if (deadline.signal.aborted) message = "本批采集已超时，已保留完成页和进度";
       if (error instanceof IdentityNotReadyError) message = "账号概览尚未就绪，请完成管理页登录或验证后重试";
       else if (error && typeof error === "object" && "errcode" in error && error.errcode === 11)
         message = "本地采集数据库损坏，数据无法保存，需要修复数据库";
       if (error instanceof RateLimitedError) {
         const level = (this.backoffLevel.get(account.id) ?? 0) + 1;
-        const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** (level - 1));
+        const delay = Math.max(error.retryAfterMs, Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** (level - 1)));
         this.backoffLevel.set(account.id, level);
         this.backoffUntil.set(account.id, Date.now() + delay);
         message = "平台限流，" + Math.round(delay / 60_000) + " 分钟后重试";
@@ -517,6 +626,10 @@ export class CollectScheduler {
           message,
           accountId: account.id,
         });
+        store.audit.append({ action: "collection.rate-limited", accountId: account.id, details: { stage: "request", retryAt: Date.now() + delay } });
+        store.db.run("INSERT INTO collection_platform_backoff(platform_id,not_before) VALUES(?,?) ON CONFLICT(platform_id) DO UPDATE SET not_before=MAX(not_before,excluded.not_before)", [account.platformId, Date.now() + delay]);
+        this.changed(store.collectJobs.defer(job.id, Date.now() + delay, message));
+        return;
       } else if (error instanceof LoggedOutError) {
         message = "平台提示未登录";
         try {
@@ -543,8 +656,14 @@ export class CollectScheduler {
           if (store.collectJobs.get(job.id)?.state !== "running" || active.abort.signal.aborted) return;
         }
       }
-      this.finish(job, startedAt, "failed", message);
+      store.audit.append({ action: "collection.failed", accountId: account.id, details: {
+        stage: deadline.signal.aborted ? "deadline" : error instanceof IdentityNotReadyError ? "identity" : "collect-or-save",
+        pagesDone: store.collectJobs.get(job.id)?.progress?.pagesDone ?? 0,
+      } });
+      this.finish(job, startedAt, metricsWrittenTotal || worksWrittenTotal ? "partial" : "failed", message,
+        metricsWrittenTotal, worksWrittenTotal, true, "incomplete");
     } finally {
+      clearTimeout(deadlineTimer);
       lease?.release();
     }
   }
@@ -556,6 +675,7 @@ export class CollectScheduler {
     metricsWritten = 0,
     worksWritten = 0,
     emit = true,
+    continuation?: "continue" | "incomplete",
   ): CollectRun {
     const { store } = this.options;
     const completed = store.db.transaction(() => {
@@ -571,10 +691,10 @@ export class CollectScheduler {
         message,
       });
       const run = store.metrics.finishRun(id, { status, message, metricsWritten, worksWritten });
-      const next = store.collectJobs.transition(
+      const next = continuation === "continue" ? store.collectJobs.defer(job.id, Date.now() + 3_000, "本批已保存，等待下一批") : store.collectJobs.transition(
         job.id,
         ["running"],
-        status === "failed" ? "failed" : "done",
+        status === "failed" || continuation === "incomplete" ? "failed" : "done",
         message,
         id,
       );

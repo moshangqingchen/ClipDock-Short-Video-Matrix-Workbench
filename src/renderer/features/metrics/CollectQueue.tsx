@@ -56,10 +56,20 @@ export function CollectQueue() {
             <div>
               <strong>{accounts.find((a) => a.id === job.accountId)?.displayName ?? "账号"}</strong>
               <span>
-                {COLLECT_JOB_LABELS[job.state]} · {formatRelative(job.createdAt)}
+                {job.paused ? "已暂停" : COLLECT_JOB_LABELS[job.state]} · {formatRelative(job.createdAt)}
               </span>
               {job.message && <small>{job.message}</small>}
+              {job.progress?.scope === "analytics" ? <small>经营页面观测 · 当前页面统计区间，90 天历史覆盖尚未验证</small> : job.progress && <small>{job.progress.scope === "history" ? "历史补采" : "近期刷新"} · 已保存 {job.progress.pagesDone} 页 / {job.progress.worksSeen} 条
+                {job.progress.total != null ? ` / 平台报告 ${job.progress.total} 条` : ""} · {job.progress.complete ? "所选范围已完成" : "范围尚未完成"}</small>}
             </div>
+            {isActiveCollectJob(job) && (
+              <Button size="sm" variant="ghost" onClick={() => void api.metrics.pauseJob(job.id, !job.paused).catch(() =>
+                useToasts.getState().push({ kind: "error", title: "更新任务状态失败" }))}>
+                {job.paused ? "继续" : "暂停"}
+              </Button>
+            )}
+            {job.state === "failed" && <Button size="sm" variant="ghost" onClick={() => void api.metrics.retryJob(job.id).catch((error: Error) =>
+              useToasts.getState().push({ kind: "error", title: "无法继续采集", message: error.message }))}>从进度重试</Button>}
             {isActiveCollectJob(job) && (
               <Button size="sm" variant="ghost" onClick={() => void cancel(job.id)}>
                 取消任务

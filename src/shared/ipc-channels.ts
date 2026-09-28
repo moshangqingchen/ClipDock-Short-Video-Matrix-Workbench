@@ -67,6 +67,12 @@ export const IPC = {
   metricsCollectNow: "metrics:collect-now",
   metricsJobs: "metrics:jobs",
   metricsCancelJob: "metrics:cancel-job",
+  metricsHistory: "metrics:history",
+  metricsPauseJob: "metrics:pause-job",
+  metricsRetryJob: "metrics:retry-job",
+  analyticsGet: "analytics:get",
+  analyticsEnable: "analytics:enable",
+  analyticsReadPage: "analytics:read-page",
   metricsRuns: "metrics:runs",
   worksList: "works:list",
   // assets

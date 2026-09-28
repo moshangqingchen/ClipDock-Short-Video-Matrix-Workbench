@@ -3,7 +3,7 @@ import { useUi } from "./index";
 
 describe("creator account navigation", () => {
   beforeEach(() => {
-    useUi.setState({ route: "metrics", creatorMode: "domestic", activeAccountId: null });
+    useUi.setState({ route: "metrics", creatorMode: "domestic", activeAccountId: null, accountEntryRevision: 0, accountEntryUrl: null });
   });
 
   it("selectAccount keeps the current page", () => {
@@ -16,15 +16,17 @@ describe("creator account navigation", () => {
     expect(useUi.getState()).toMatchObject({ route: "creator", activeAccountId: "account-2" });
   });
 
-  it("requests a fresh homepage entry even when the same account is opened again", () => {
+  it("does not request fresh navigation when the same account is opened or selected again", () => {
     useUi.getState().openAccount("account-2");
     const revision = useUi.getState().accountEntryRevision;
     useUi.getState().openAccount("account-2");
     expect(useUi.getState()).toMatchObject({
       route: "creator",
       activeAccountId: "account-2",
-      accountEntryRevision: revision + 1,
+      accountEntryRevision: revision,
     });
+    useUi.getState().selectAccount("account-2");
+    expect(useUi.getState().accountEntryRevision).toBe(revision);
   });
 
   it("opens a selected work once and clears its target on ordinary account entry", () => {

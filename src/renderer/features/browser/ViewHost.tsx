@@ -22,8 +22,8 @@ function measure(el: HTMLElement): ViewBounds | null {
 
 /**
  * The native account view is positioned over this element. It never owns the
- * page: a new workspace entry requests the platform homepage once. Restoring
- * the same workspace after a modal or network pause keeps its current page.
+ * page: the pool opens the official entry only when no live page exists.
+ * Account switches, modal restoration and repeated selection reuse that page.
  */
 export function ViewHost({ accountId, initialUrl, onError }: {
   accountId: string;

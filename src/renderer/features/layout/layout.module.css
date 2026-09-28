@@ -36,13 +36,9 @@
 .brandMark {
   width: 34px;
   height: 34px;
-  border-radius: 10px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(135deg, var(--brand-400), var(--brand-700));
-  color: #fff;
+  display: block;
+  object-fit: contain;
   flex: 0 0 auto;
-  box-shadow: 0 6px 14px rgba(38, 115, 255, 0.35);
 }
 .brandText {
   min-width: 0;

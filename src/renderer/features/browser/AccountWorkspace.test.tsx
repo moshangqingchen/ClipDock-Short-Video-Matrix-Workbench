@@ -63,15 +63,17 @@ describe("account workspace entry and management navigation", () => {
     );
   });
 
-  it("re-enters the same selected account while scan metadata updates preserve its current page", async () => {
+  it("keeps the native host mounted when selecting the same account or updating scan metadata", async () => {
     const account = open("xiaohongshu");
     await waitFor(() => expect(api.views.show).toHaveBeenCalledTimes(1));
     act(() => useAccounts.getState().upsert({ ...account, displayName: "更新后的账号资料" }));
     await act(async () => undefined);
     expect(api.views.show).toHaveBeenCalledTimes(1);
     act(() => useUi.getState().openAccount(account.id));
-    await waitFor(() => expect(api.views.show).toHaveBeenCalledTimes(2));
-    expect(api.views.show).toHaveBeenLastCalledWith(account.id, expect.any(Object), true);
+    await act(async () => undefined);
+    expect(api.views.show).toHaveBeenCalledTimes(1);
+    expect(api.views.hide).not.toHaveBeenCalled();
+    expect(api.views.navigate).not.toHaveBeenCalled();
   });
 
   it("opens a selected work without the default homepage replacing it", async () => {
@@ -81,7 +83,11 @@ describe("account workspace entry and management navigation", () => {
     await waitFor(() => expect(api.views.show).toHaveBeenCalledWith(account.id, expect.any(Object), false));
     expect(api.views.navigate).toHaveBeenCalledExactlyOnceWith(account.id, "https://www.douyin.com/video/123");
     act(() => useUi.getState().openAccount(account.id));
-    await waitFor(() => expect(api.views.show).toHaveBeenLastCalledWith(account.id, expect.any(Object), true));
+    await waitFor(() => expect(api.views.show).toHaveBeenCalledTimes(2));
+    expect(api.views.show).toHaveBeenLastCalledWith(account.id, expect.any(Object), false);
     expect(api.views.navigate).toHaveBeenCalledTimes(1);
+    act(() => useUi.getState().openWork(account.id, "https://www.douyin.com/video/456"));
+    await waitFor(() => expect(api.views.navigate).toHaveBeenCalledTimes(2));
+    expect(api.views.navigate).toHaveBeenLastCalledWith(account.id, "https://www.douyin.com/video/456");
   });
 });

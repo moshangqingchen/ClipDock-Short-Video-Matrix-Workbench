@@ -1,3 +1,4 @@
+import { workMetric } from "@shared/metric-quality";
 import { useCallback, useEffect, useState } from "react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Eye, Heart, MessageCircle, RefreshCw, Users, X } from "lucide-react";
@@ -157,9 +158,9 @@ export function DataDrawer({ account, onClose }: { account: Account; onClose: ()
                   <div className={styles.workMeta}>
                     <strong title={work.title}>{work.title || "(无标题)"}</strong>
                     <span>
-                      <span className="num">▶ {formatNumber(work.plays)}</span>
-                      <span className="num">♥ {formatNumber(work.likes)}</span>
-                      <span className="num">💬 {formatNumber(work.comments)}</span>
+                      <span className="num">▶ {formatNumber(workMetric(work, "plays"))}</span>
+                      <span className="num">♥ {formatNumber(workMetric(work, "likes"))}</span>
+                      <span className="num">💬 {formatNumber(workMetric(work, "comments"))}</span>
                       <span>{work.publishedAt ? formatDateTime(work.publishedAt) : ""}</span>
                     </span>
                   </div>

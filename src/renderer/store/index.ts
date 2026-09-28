@@ -108,7 +108,7 @@ interface UiState {
   route: Route;
   creatorMode: "domestic" | "global";
   activeAccountId: string | null;
-  /** Re-entering even the selected account opens its default platform homepage. */
+  /** Explicit work requests remount their host; ordinary account selection preserves it. */
   accountEntryRevision: number;
   /** Explicit work navigation; ordinary account entry always clears this target. */
   accountEntryUrl: string | null;
@@ -182,17 +182,15 @@ export const useUi = create<UiState>((set) => ({
   selectAccount: (id) =>
     set((state) => ({
       activeAccountId: id,
-      accountEntryRevision: state.accountEntryRevision + 1,
       accountEntryUrl: null,
       ...(state.route === "metrics" ? { metricsAccountId: id } : {}),
     })),
-  openAccount: (id) => set((state) => ({
+  openAccount: (id) => set({
     activeAccountId: id,
-    accountEntryRevision: state.accountEntryRevision + 1,
     accountEntryUrl: null,
     creatorMode: "domestic",
     route: "creator",
-  })),
+  }),
   openWork: (id, url) => set((state) => ({
     activeAccountId: id,
     accountEntryRevision: state.accountEntryRevision + 1,

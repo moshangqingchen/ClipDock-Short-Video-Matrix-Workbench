@@ -10,6 +10,7 @@ import type {
   Work,
   WorkDto,
 } from "@shared/types";
+import { WORK_METRICS } from "@shared/types";
 
 export type MediaProjectionSubject =
   { accountId: string; kind: "avatar" } | { accountId: string; kind: "cover"; workId: string };
@@ -70,6 +71,8 @@ export function createMediaProjection<Mode extends MediaProjectionMode>(
 
   const projectWork = (work: Work): WorkDto<Mode> =>
     ({
+      ...(work.observations ? { observations: Object.fromEntries(WORK_METRICS.filter((key) => work.observations?.[key]).map((key) =>
+        [key, { capturedAt: work.observations![key]!.capturedAt, origin: work.observations![key]!.origin }])) } : {}),
       id: work.id,
       accountId: work.accountId,
       platformId: work.platformId,
@@ -90,6 +93,7 @@ export function createMediaProjection<Mode extends MediaProjectionMode>(
   const projectPlatformSummary = (platform: PlatformSummaryView): PlatformSummaryDto<Mode> =>
     ({
       platformId: platform.platformId,
+      ...(platform.coverage ? { coverage: { ...platform.coverage } } : {}),
       accountCount: platform.accountCount,
       onlineCount: platform.onlineCount,
       totals: { ...platform.totals },

@@ -1,3 +1,4 @@
+import type { AnalyticsRecord } from "./business-analytics";
 import type { GlobalAccount } from "./global-accounts";
 import type { WebObservation } from "./global-web-observation";
 import type { GlobalWork, GlobalPublishRecord } from "./global-workspace";
@@ -103,6 +104,10 @@ export const METRIC_NAMES: readonly MetricName[] = [
 ];
 
 export type MetricSource = "session" | "manual";
+export type MetricOrigin = "official" | "page" | "legacy";
+export const WORK_METRICS = ["plays", "likes", "comments", "shares", "favorites"] as const;
+export type WorkMetric = (typeof WORK_METRICS)[number];
+export interface FieldObservation { capturedAt: string; origin: MetricOrigin }
 
 export interface MetricSnapshot {
   id?: number;
@@ -112,11 +117,14 @@ export interface MetricSnapshot {
   value: number;
   capturedAt: string;
   source: MetricSource;
+  origin?: MetricOrigin;
   /** Work-level snapshot when set; account-level when null. */
   workId?: string | null;
 }
 
 export interface Work {
+  /** Missing entries are unknown, not zero. Absent metadata identifies legacy data. */
+  observations?: Partial<Record<WorkMetric, FieldObservation>>;
   id: string;
   accountId: string;
   platformId: PlatformId;
@@ -150,6 +158,8 @@ export interface CollectRun {
 }
 
 export interface MetricDelta {
+  capturedAt?: string;
+  origin?: MetricOrigin;
   current: number | null;
   day: number | null;
   week: number | null;
@@ -157,6 +167,8 @@ export interface MetricDelta {
 }
 
 export interface AccountMetricsView {
+  collectedWorkCount?: number;
+  workTotals?: Partial<Record<WorkMetric, number>>;
   accountId: string;
   platformId: PlatformId;
   capturedAt: string | null;
@@ -166,6 +178,7 @@ export interface AccountMetricsView {
 }
 
 export interface PlatformSummaryView {
+  coverage?: Partial<Record<MetricName, number>>;
   platformId: PlatformId;
   accountCount: number;
   onlineCount: number;
@@ -309,6 +322,7 @@ export interface BackupMetadata {
 }
 
 export interface BackupPayload {
+  analytics?: AnalyticsRecord[];
   metadata: BackupMetadata;
   accounts: Account[];
   metrics: MetricSnapshot[];

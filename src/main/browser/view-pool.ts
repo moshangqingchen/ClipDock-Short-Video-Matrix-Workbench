@@ -3,8 +3,11 @@ import { WebContentsView, type BaseWindow, type WebContents } from "electron";
 import { getPlatform, isLoginUrl, isVerificationUrl, platformEntryUrl, type PlatformId } from "@shared/platforms";
 import type { ViewBounds, ViewState } from "@shared/types";
 import { configureAccountSession, type ConfiguredSession } from "./account-session";
-import { CookieGuard } from "./cookie-guard";
+import { CookieGuard, type CookieDiagnostic } from "./cookie-guard";
 import { IdentityObserver } from "./identity-observer";
+import { DouyinQrObserver, type DouyinQrDiagnostic } from "./douyin-qr-observer";
+import { isHomepageContext } from "./homepage-login";
+import { WorksRequestObserver } from "./works-request-observer";
 import type { IdentityEvidence } from "./identity-evidence";
 import { closeAccountView } from "@main/network/close-account-view";
 import { installNavigationPolicy } from "./navigation-policy";
@@ -27,9 +30,13 @@ export interface ViewPoolOptions {
   maxLive: number;
   /** Hook for status detection: fired after navigation settles or cookies change. */
   onActivity?: (accountId: string, reason: "navigated" | "cookies" | "loaded" | "identity") => void;
+  onCookieDiagnostic?: (accountId: string, diagnostic: CookieDiagnostic) => void;
+  onQrDiagnostic?: (accountId: string, diagnostic: DouyinQrDiagnostic) => void;
 }
 
 interface LiveView {
+  qrObserver?: DouyinQrObserver;
+  worksObserver?: WorksRequestObserver;
   account: ViewPoolAccount;
   view: WebContentsView;
   /** Keep the original handle: Electron clears view.webContents during destruction. */
@@ -45,6 +52,7 @@ interface LiveView {
   attached: boolean;
   visible: boolean;
   lastUsedAt: number;
+  homepageRetainUntil: number;
   lastError: string | null;
   bounds: ViewBounds | null;
   /** Set once the first real navigation has been issued. */
@@ -58,6 +66,8 @@ export interface ViewPoolEvents {
 }
 
 const MIN_BOUNDS: ViewBounds = { x: 0, y: 0, width: 1, height: 1 };
+// Public sites can show their QR dialog without changing the page URL.
+const HOMEPAGE_SWITCH_GRACE_MS = 2 * 60_000;
 
 /**
  * Owns every account WebContentsView. Views are long-lived: switching accounts
@@ -72,6 +82,7 @@ export class ViewPool extends EventEmitter {
   private maxLive: number;
   private disposed = false;
   private revision = 0;
+  private homepageEvictionTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly options: ViewPoolOptions) {
     super();
@@ -89,6 +100,9 @@ export class ViewPool extends EventEmitter {
 
   listStates(): ViewState[] {
     return [...this.live.values()].map((entry) => this.toState(entry));
+  }
+  getWorksRequest(accountId: string) {
+    return this.live.get(accountId)?.worksObserver?.read() ?? null;
   }
 
   getState(accountId: string): ViewState | null {
@@ -171,9 +185,11 @@ export class ViewPool extends EventEmitter {
     this.applyBounds(entry, bounds);
     this.setVisible(entry, true);
     entry.lastUsedAt = Date.now();
-    if (enterHomepage) {
+    if (enterHomepage && !entry.navigated) {
       // Claim the foreground before loading so collectors cannot treat this
       // entry as a hidden page and redirect it into the creator console.
+      // Re-entering an existing account only restores its live page, including
+      // QR dialogs and in-progress login redirects. go/navigate are explicit.
       // Page loading stays asynchronous, allowing account switches and an
       // explicit management click to supersede a slow homepage request.
       entry.navigated = true;
@@ -304,6 +320,7 @@ export class ViewPool extends EventEmitter {
 
   dispose(): void {
     this.disposed = true;
+    if (this.homepageEvictionTimer) clearTimeout(this.homepageEvictionTimer);
     for (const entries of this.owned.values()) for (const entry of entries) this.beginClose(entry);
     this.live.clear();
   }
@@ -347,6 +364,7 @@ export class ViewPool extends EventEmitter {
       attached: false,
       visible: false,
       lastUsedAt: Date.now(),
+      homepageRetainUntil: 0,
       lastError: null,
       bounds: null,
       navigated: false,
@@ -364,11 +382,15 @@ export class ViewPool extends EventEmitter {
       entry.identityObserver = new IdentityObserver(webContents, account.id, account.platformId, () =>
         this.options.onActivity?.(account.id, "identity"),
       );
+      if (account.platformId === "weixin_channels") entry.worksObserver = new WorksRequestObserver(webContents, account.id);
+      if (account.platformId === "douyin") entry.qrObserver = new DouyinQrObserver(webContents, account.id,
+        (diagnostic) => this.options.onQrDiagnostic?.(account.id, diagnostic));
       entry.disposeNavigation = installNavigationPolicy(webContents, account.platformId, {
         allowNetwork: () => canUseBusinessNetwork(account.id),
       });
       entry.cookieGuard = new CookieGuard(session.session, account.platformId, {
         onSessionCookiesChanged: () => this.options.onActivity?.(account.id, "cookies"),
+        onDiagnostic: (diagnostic) => this.options.onCookieDiagnostic?.(account.id, diagnostic),
       });
       void entry.cookieGuard.persistExisting();
       return entry;
@@ -488,9 +510,12 @@ export class ViewPool extends EventEmitter {
   private setVisible(entry: LiveView, visible: boolean): void {
     if (entry.visible === visible) return;
     entry.visible = visible;
+    entry.homepageRetainUntil = !visible && isHomepageContext(entry.account.platformId, entry.webContents.getURL())
+      ? Date.now() + HOMEPAGE_SWITCH_GRACE_MS : 0;
     entry.view.setVisible(visible);
     if (visible && entry.bounds) entry.view.setBounds(entry.bounds);
     if (!visible) entry.view.setBounds(MIN_BOUNDS);
+    this.scheduleHomepageEviction();
   }
 
   private evictIfNeeded(incomingId: string | null): void {
@@ -499,11 +524,27 @@ export class ViewPool extends EventEmitter {
       const candidates = [...this.live.values()]
         .filter((entry) => !entry.visible)
         .filter((entry) => !this.isOnLoginPage(entry))
+        .filter((entry) => entry.homepageRetainUntil <= Date.now())
         .sort((a, b) => a.lastUsedAt - b.lastUsedAt);
       const victim = candidates[0];
       if (!victim) break;
       this.remove(victim.account.id);
     }
+    this.scheduleHomepageEviction();
+  }
+
+  private scheduleHomepageEviction(): void {
+    if (this.homepageEvictionTimer) clearTimeout(this.homepageEvictionTimer);
+    this.homepageEvictionTimer = undefined;
+    if (this.disposed) return;
+    const deadlines = [...this.live.values()]
+      .filter((entry) => !entry.visible && entry.homepageRetainUntil > Date.now())
+      .map((entry) => entry.homepageRetainUntil);
+    if (!deadlines.length) return;
+    this.homepageEvictionTimer = setTimeout(() => {
+      this.homepageEvictionTimer = undefined;
+      this.evictIfNeeded(null);
+    }, Math.max(1, Math.min(...deadlines) - Date.now()));
   }
 
   private isOnLoginPage(entry: LiveView): boolean {
@@ -527,6 +568,8 @@ export class ViewPool extends EventEmitter {
   private beginClose(entry: LiveView): Promise<void> {
     if (entry.closePromise) return entry.closePromise;
     entry.identityObserver?.dispose();
+    entry.worksObserver?.dispose();
+    entry.qrObserver?.dispose();
     entry.identityObserver = null;
     entry.navigationVersion++;
     this.detach(entry);
@@ -559,6 +602,8 @@ export class ViewPool extends EventEmitter {
       entry.resourcesReleased = true;
       for (const release of [
         () => entry.identityObserver?.dispose(),
+        () => entry.worksObserver?.dispose(),
+        () => entry.qrObserver?.dispose(),
         entry.disposeNavigation,
         entry.disposeNetworkBinding,
         () => entry.cookieGuard?.dispose(),

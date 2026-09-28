@@ -1,4 +1,5 @@
-import { app, BaseWindow, screen, session, shell, WebContentsView } from "electron";
+import { app, BaseWindow, nativeImage, screen, session, shell, WebContentsView } from "electron";
+import { appIconPng } from "./app-icon";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureShellNetworkGuard } from "@main/network/shell-network-guard";
@@ -70,6 +71,7 @@ export function createMainWindow(userDataPath: string): MainWindow {
     minWidth: MIN_WIDTH,
     minHeight: MIN_HEIGHT,
     title: "短视频矩阵工作台",
+    icon: nativeImage.createFromBuffer(Buffer.from(appIconPng, "base64")),
     backgroundColor: "#0f1420",
     show: false,
     autoHideMenuBar: true,

@@ -5,17 +5,17 @@
  *   Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)
  *   short-video-matrix-workbench/1.0.0 Chrome/140.0.0.0 Electron/43.3.0 Safari/537.36
  *
- * Platform risk-control SDKs treat the `Electron/` token as automation and
- * throttle login endpoints aggressively. Removing the two non-Chrome tokens
- * yields the exact UA a real Chrome of the same engine version would send,
- * which is the least suspicious identity possible for this process.
+ * Keep the actual Chromium version while omitting the application and Electron
+ * wrapper tokens. Installed application versions can contain prerelease and
+ * build suffixes; matching only digits leaves those product tokens in the UA.
+ * This normalization alone does not establish website login compatibility.
  */
 export function toChromeUserAgent(fallback: string): string {
   return (
     fallback
-      .replace(/\sElectron\/[\d.]+/i, "")
+      .replace(/\sElectron\/\S+/i, "")
       // The product token can be any string (including non-ASCII app names).
-      .replace(/\s\S+\/[\d.]+(?=\sChrome\/)/, "")
+      .replace(/\s[^\s/]+\/\S+(?=\sChrome\/)/, "")
       .replace(/\s{2,}/g, " ")
       .trim()
   );

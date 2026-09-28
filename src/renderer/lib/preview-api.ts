@@ -3,6 +3,7 @@ import type { WorkbenchApi, ToastEvent } from "@shared/ipc";
 import { checkingNetworkSnapshot, DEFAULT_NETWORK_SETTINGS, networkSettingsSchema } from "@shared/network";
 import type { CredentialRef, CredentialMetadata } from "@shared/credentials";
 import type { CollectJob } from "@shared/collect-jobs";
+import { BUSINESS_METRICS, type AnalyticsView } from "@shared/business-analytics";
 import {
   globalAccountCreateSchema,
   globalAccountIdSchema,
@@ -452,12 +453,12 @@ export function createPreviewApi(): WorkbenchApi {
       refreshProfile: async (id) => accounts.find((a) => a.id === id)!,
     },
     views: {
-      show: async (id, _bounds, enterHomepage = false) => {
+      show: async (id, _bounds) => {
         const state: ViewState = {
           accountId: id,
           attached: true,
           visible: true,
-          url: (!enterHomepage && views.get(id)?.url) || platformEntryUrl(accounts.find((a) => a.id === id)!.platformId),
+          url: views.get(id)?.url || platformEntryUrl(accounts.find((a) => a.id === id)!.platformId),
           title: "预览模式",
           loading: false,
           canGoBack: false,
@@ -481,6 +482,13 @@ export function createPreviewApi(): WorkbenchApi {
       state: async (id) => views.get(id) ?? null,
       states: async () => [...views.values()],
       openDevTools: async () => undefined,
+    },
+    analytics: {
+      get: async (accountId) => ({ accountId, platformId: accounts.find((a) => a.id === accountId)?.platformId ?? "douyin", enabled: false,
+        records: [], states: BUSINESS_METRICS.map((metric) => ({ metric, state: "disabled", reason: "预览模式不读取真实数据", checkedAt: null })),
+        requestedStart: now.slice(0,10), requestedEnd: now.slice(0,10), lastAttemptAt: null } satisfies AnalyticsView),
+      setEnabled: async () => undefined,
+      readCurrentPage: async () => { throw new Error("请在桌面端读取官方分析页面"); },
     },
     metrics: {
       account: async (id, days = 30) =>
@@ -544,6 +552,10 @@ export function createPreviewApi(): WorkbenchApi {
       },
       jobs: async () => [],
       cancelJob: async () => null,
+      pauseJob: async () => null,
+      retryJob: async () => null,
+      collectHistory: async (accountId) => ({ id: uuid(), accountId, state: "cancelled", trigger: "manual", createdAt: now,
+        updatedAt: now, startedAt: null, finishedAt: now, message: "预览模式", runId: null, attempts: 0 }),
       runs: async (id) => [
         metricsFor(
           accounts.find((a) => a.id === id)!,

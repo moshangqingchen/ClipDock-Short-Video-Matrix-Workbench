@@ -11,6 +11,7 @@ import type { GlobalJobsApi } from "./global-jobs";
 import type { GlobalUploadsApi } from "./global-uploads";
 import type { GlobalWebApi } from "./global-web";
 import type { CollectJob } from "./collect-jobs";
+import type { AnalyticsApi } from "./business-analytics";
 import type {
   AccountDto,
   AccountMetricsView,
@@ -127,6 +128,7 @@ export interface BackupImportResult {
 }
 
 export interface WorkbenchApi {
+  analytics: AnalyticsApi;
   globalWorkspace: GlobalWorkspaceApi;
   globalAccounts: GlobalAccountApi;
   globalApps: GlobalAppsApi;
@@ -169,10 +171,13 @@ export interface WorkbenchApi {
     collectNow(id?: string): Promise<CollectJob[]>;
     jobs(id?: string): Promise<CollectJob[]>;
     cancelJob(id: string): Promise<CollectJob | null>;
+    collectHistory(id: string): Promise<CollectJob>;
+    pauseJob(id: string, paused: boolean): Promise<CollectJob | null>;
+    retryJob(id: string): Promise<CollectJob | null>;
     runs(id: string, limit?: number): Promise<CollectRun[]>;
   };
   works: {
-    list(id: string, limit?: number): Promise<WorkDto<MediaProjectionMode>[]>;
+    list(id: string, limit?: number, offset?: number): Promise<WorkDto<MediaProjectionMode>[]>;
   };
   assets: {
     list(): Promise<Asset[]>;

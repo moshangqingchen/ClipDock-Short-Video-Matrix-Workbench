@@ -61,7 +61,7 @@ function collectorSourceRequests(platformId: CnPlatformId) {
         node.templateSpans
           .map(
             (span) =>
-              (constants.get(span.expression.getText(source)) ??
+              ((/ctx\.progress\?\.page/.test(span.expression.getText(source)) ? "{page}" : /ctx\.progress\?\.cursor/.test(span.expression.getText(source)) ? "{cursor}" : constants.get(span.expression.getText(source))) ??
                 "{" + span.expression.getText(source) + "}") + span.literal.text,
           )
           .join("")
@@ -69,7 +69,7 @@ function collectorSourceRequests(platformId: CnPlatformId) {
     throw new Error("Source changed to a nonliteral collector URL; review inventory");
   };
   walk(source, (node) => {
-    if (!ts.isCallExpression(node) || node.expression.getText(source) !== "firstJson") return;
+    if (!ts.isCallExpression(node) || !["firstJson", "worksJson"].includes(node.expression.getText(source))) return;
     let parent: ts.Node | undefined = node.parent;
     while (parent && !ts.isFunctionDeclaration(parent)) parent = parent.parent;
     const name = parent && ts.isFunctionDeclaration(parent) ? parent.name?.getText(source) : undefined;
@@ -91,7 +91,7 @@ function collectorSourceRequests(platformId: CnPlatformId) {
 }
 
 describe("operation source inventory", () => {
-  it("matches all 37 real collector URL/method alternatives and all platform navigation/probe metadata", () => {
+  it("matches all 36 real collector URL/method alternatives and all platform navigation/probe metadata", () => {
     let count = 0;
     for (const platformId of CN_PLATFORM_IDS) {
       const inventory = getOperationSourceInventory(platformId);
@@ -114,7 +114,7 @@ describe("operation source inventory", () => {
       expect(inventory.probeFromMain).toBe(platform.login.probeFromMain);
       expect(inventory.sourceVersion).toMatch(/^cn-operation-source-v1:[a-f0-9]{64}$/);
     }
-    expect(count).toBe(37);
+    expect(count).toBe(36);
     expect(candidateTargets()).toHaveLength(30);
   });
 

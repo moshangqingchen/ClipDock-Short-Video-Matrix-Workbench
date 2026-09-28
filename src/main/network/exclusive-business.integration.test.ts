@@ -395,10 +395,14 @@ describe("exclusive network policy across real business services", () => {
       f.scheduler.applySettings(
         f.store.settings.patch({ collectEnabled: trigger === "scheduled", keepaliveEnabled: true }),
       );
-      // Keepalive uses its durable attempt history, independently of authentication patrols.
+      // Seed a completed historical attempt, not an old start that just finished:
+      // unsuccessful keepalive backoff is measured from completion, independently of patrols.
+      const currentTime = Date.now();
+      vi.setSystemTime(new Date("2020-01-01T00:00:00.000Z"));
       const previous = f.store.metrics.startRun({ accountId: account.id, platformId: account.platformId,
         startedAt: "2020-01-01T00:00:00.000Z", status: "skipped", trigger: "keepalive" });
       f.store.metrics.finishRun(previous, { status: "skipped", metricsWritten: 0, worksWritten: 0 });
+      vi.setSystemTime(currentTime);
       expect(f.store.collectJobs.list(account.id)).toEqual([]);
       await vi.advanceTimersByTimeAsync(180_000);
       const jobs = f.store.collectJobs.list(account.id);

@@ -916,6 +916,48 @@ async function verifyDomesticOptimization() {
   console.log('domestic optimization smoke: 960/1120/1440/1920 px; six packaged logos; 52/40 px hierarchy; search/collapse; IPC check feedback and deduplication');
 }
 
+async function verifyCollectionQuality() {
+  const result = await evaluate(`(async () => {
+    const all = await window.workbench.accounts.list();
+    const accounts = all.filter(a => a.displayName.startsWith('层级测试 · '));
+    const views = await Promise.all(accounts.map(a => window.workbench.analytics.get(a.id,90)));
+    if(views.length !== 6 || views.some(v => v.enabled || v.records.length || v.states.some(s => s.state !== 'disabled'))) throw new Error('analytics defaults are unsafe');
+    const target = accounts.find(a => a.platformId === 'douyin');
+    await window.workbench.analytics.setEnabled('douyin',true);
+    const enabled = await window.workbench.analytics.get(target.id,7);
+    await window.workbench.analytics.setEnabled('douyin',false);
+    let invalid = false;
+    try { await window.workbench.works.list(target.id,50,-1); } catch { invalid = true; }
+    const history = await window.workbench.metrics.collectHistory(target.id);
+    return {enabled:enabled.enabled, invalid, scope:history.progress?.scope, complete:history.progress?.complete};
+  })()`);
+  if (!result.enabled || !result.invalid || result.scope !== 'history' || result.complete) throw new Error('collection quality preload contract failed');
+  await evaluate(`[...document.querySelectorAll('nav[aria-label="主导航"] button')].find(b => b.textContent === '数据观测').click()`);
+  await sleep(350);
+  await evaluate(`[...document.querySelectorAll('tbody tr')].find(r => r.textContent.includes('层级测试 · douyin')).click()`);
+  await sleep(350);
+  await evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent === '经营分析').click()`);
+  await sleep(250);
+  for (const width of [960,1440]) {
+    await command('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
+    await sleep(250);
+    const ui = await evaluate(`(() => ({
+      analytics:[...document.querySelectorAll('h3')].some(h=>h.textContent==='经营分析'),
+      empty:[...document.querySelectorAll('span')].filter(s=>s.textContent==='暂无可验证的数据').length,
+      history:[...document.querySelectorAll('button')].some(b=>b.textContent==='补齐历史作品'),
+      overflow:document.documentElement.scrollWidth>innerWidth,
+      nested:document.querySelectorAll('button button').length
+      ,headingWidth:document.querySelector('h2')?.getBoundingClientRect().width
+    }))()`);
+    if (!ui.analytics || ui.empty!==5 || !ui.history || ui.overflow || ui.nested || ui.headingWidth<180) throw new Error('collection detail layout failed: '+JSON.stringify({width,...ui}));
+    const shot = await command('Page.captureScreenshot',{format:'png'});
+    fs.mkdirSync(path.resolve('output/collection'),{recursive:true});
+    fs.writeFileSync(path.resolve('output/collection/detail-'+width+'.png'),Buffer.from(shot.data,'base64'));
+  }
+  await command('Emulation.clearDeviceMetricsOverride');
+  console.log('collection quality smoke: six disabled analytics adapters; validated IPC; resumable history; 960/1440 px account detail');
+}
+
 let ok = false;
 let globalBoundaryStarted = false;
 try {
@@ -929,6 +971,8 @@ try {
       if (path.resolve(info.userDataPath) !== path.resolve(dataDir))
         throw new Error("refusing a non-smoke profile");
       if (/Electron/.test(info.userAgent)) throw new Error(`UA still advertises Electron: ${info.userAgent}`);
+      if (/(?:短视频矩阵工作台|short-video-matrix-workbench)\//i.test(info.userAgent))
+        throw new Error("UA still includes the application product/version token");
       const accounts = await evaluate("window.workbench.accounts.list()");
       if (!Array.isArray(accounts)) throw new Error("accounts.list did not return an array");
       const rendered = await evaluate("Boolean(document.querySelector('nav[aria-label=主导航]'))");
@@ -984,6 +1028,7 @@ try {
       await verifyGlobalAccounts(accounts);
       const globalSecretChecked = await verifyGlobalAppConfiguration(credentials.checked);
       await verifyDomesticOptimization();
+      await verifyCollectionQuality();
       if (process.argv.includes("--require-domestic-direct")) {
         const deadline = Date.now() + 60000;
         let direct;

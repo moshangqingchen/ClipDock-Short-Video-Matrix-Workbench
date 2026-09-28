@@ -1,8 +1,8 @@
 import type { Work } from "@shared/types";
 import { PLATFORMS } from "@shared/platforms";
 import {
+  completeProfile,
   DEFAULT_LABELS,
-  aggregateFromWorks,
   domScrapeNumbers,
   emptyResult,
   firstDefined,
@@ -14,6 +14,8 @@ import {
   toIso,
   toNumber,
   worksToMetrics,
+  worksJson,
+  recordWorksPage,
   type Collector,
   type CollectorContext,
   type CollectorProfile,
@@ -64,7 +66,7 @@ async function readProfile(ctx: CollectorContext): Promise<CollectorProfile | nu
         firstDefined(user, ["fans_num", "fansCount", "subscribe_num"]),
     ),
     likes: toNumber(firstDefined(stats, ["like_num", "likeCount", "praise_num"])),
-    plays: toNumber(firstDefined(stats, ["view_num", "read_num", "playCount", "recommend_num"])),
+    plays: toNumber(firstDefined(stats, ["view_num", "read_num", "playCount"])),
     comments: toNumber(firstDefined(stats, ["comment_num", "commentCount"])),
     works: toNumber(
       firstDefined(stats, ["article_num", "content_num", "works"]) ??
@@ -74,17 +76,18 @@ async function readProfile(ctx: CollectorContext): Promise<CollectorProfile | nu
 }
 
 async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work[] | null> {
-  const json = await firstJson(
-    ctx.webContents,
+  const json = await worksJson(
+    ctx,
     [
-      { url: `${BASE}/pcui/article/lists?type=video&collection=&pageSize=30&currentPage=1` },
-      { url: `${BASE}/pcui/article/lists?type=&collection=&pageSize=30&currentPage=1` },
-      { url: `${BASE}/builder/author/article/list?type=video&page=1&size=30` },
+      { url: `${BASE}/pcui/article/lists?type=video&collection=&pageSize=30&currentPage=${ctx.progress?.page ?? 1}` },
+      { url: `${BASE}/pcui/article/lists?type=&collection=&pageSize=30&currentPage=${ctx.progress?.page ?? 1}` },
+      { url: `${BASE}/builder/author/article/list?type=video&page=${ctx.progress?.page ?? 1}&size=30` },
     ],
     (j) => Array.isArray(pick(j, "data.list")) || Array.isArray(pick(j, "data.items")),
   );
   if (!json) return null;
   const list = (pick(json, "data.list") ?? pick(json, "data.items")) as any[];
+  recordWorksPage(ctx, json, list, "page", []);
   return list
     .map((item) => {
       const remoteId = String(firstDefined(item, ["article_id", "id", "nid"]) ?? "");
@@ -101,11 +104,11 @@ async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work
           publishedAt: toIso(firstDefined(item, ["publish_at", "publish_time", "created_at", "updated_at"])),
           status: String(firstDefined(item, ["status_name", "status", "audit_status"]) ?? "") || null,
           plays:
-            toNumber(firstDefined(item, ["view_count", "read_count", "play_count", "recommend_count"])) ?? 0,
-          likes: toNumber(firstDefined(item, ["like_count", "praise_count", "likes"])) ?? 0,
-          comments: toNumber(firstDefined(item, ["comment_count", "comments"])) ?? 0,
-          shares: toNumber(firstDefined(item, ["share_count", "forward_count"])) ?? 0,
-          favorites: toNumber(firstDefined(item, ["collect_count", "favorite_count"])) ?? 0,
+            toNumber(firstDefined(item, ["view_count", "read_count", "play_count"])),
+          likes: toNumber(firstDefined(item, ["like_count", "praise_count", "likes"])),
+          comments: toNumber(firstDefined(item, ["comment_count", "comments"])),
+          shares: toNumber(firstDefined(item, ["share_count", "forward_count"])),
+          favorites: toNumber(firstDefined(item, ["collect_count", "favorite_count"])),
         },
         fetchedAt,
       );
@@ -124,33 +127,15 @@ export const baijiahaoCollector: Collector = {
   async collect(ctx): Promise<CollectorResult> {
     const result = emptyResult();
     const capturedAt = new Date().toISOString();
-    let profile = await readProfile(ctx);
-    if (!profile || profile.followers == null) {
-      const scraped = await domScrapeNumbers(ctx.webContents, DEFAULT_LABELS);
-      if (Object.keys(scraped).length) {
-        profile = {
-          ...(profile ?? {}),
-          followers: profile?.followers ?? scraped.followers ?? null,
-          following: profile?.following ?? scraped.following ?? null,
-          likes: profile?.likes ?? scraped.likes ?? null,
-          comments: profile?.comments ?? scraped.comments ?? null,
-          shares: profile?.shares ?? scraped.shares ?? null,
-          favorites: profile?.favorites ?? scraped.favorites ?? null,
-          plays: profile?.plays ?? scraped.plays ?? null,
-          works: profile?.works ?? scraped.works ?? null,
-        };
-        result.warnings.push("部分数据从页面读取");
-      } else if (!profile) {
-        result.warnings.push("无法读取账号概览");
-      }
-    }
+    let profile = ctx.skipProfile ? null : await readProfile(ctx);
+    if (!ctx.skipProfile) profile = completeProfile(profile, await domScrapeNumbers(ctx.webContents, DEFAULT_LABELS), result.warnings);
     const fetchedWorks = await readWorks(ctx, capturedAt);
     if (fetchedWorks === null) result.warnings.push("作品接口不可用");
     const works = fetchedWorks ?? [];
-    if (profile && works.length && profile.plays == null)
-      profile = { ...profile, ...aggregateFromWorks(works) };
     result.profile = profile;
     result.works = works;
+    result.page = ctx.pageResult;
+    if (result.page?.hasMore === null) result.warnings.push(result.page.reason ?? "分页范围未确认");
     result.metrics = [
       ...(profile ? profileToMetrics(ctx.account, profile, capturedAt) : []),
       ...worksToMetrics(works, capturedAt),

@@ -9,6 +9,7 @@ import type {
 import { METRIC_NAMES } from "@shared/types";
 import { PLATFORM_IDS, type PlatformId } from "@shared/platforms";
 import type { Store } from "@main/db";
+import { beijingDayStart } from "@shared/metric-quality";
 
 const ACCOUNT_METRICS: readonly MetricName[] = [
   "followers",
@@ -31,15 +32,12 @@ const TOTAL_METRICS: readonly MetricName[] = [
 ];
 
 function isoDaysAgo(days: number, now = Date.now()): string {
-  return new Date(now - days * 86_400_000).toISOString();
+  return beijingDayStart(days - 1, now);
 }
 
-/** Local-time start of the day `daysAgo` days back, as an ISO (UTC) string. */
+/** Beijing start of the day `daysAgo` days back, as an ISO (UTC) string. */
 function startOfLocalDayIso(daysAgo: number, now = Date.now()): string {
-  const date = new Date(now);
-  date.setHours(0, 0, 0, 0);
-  date.setDate(date.getDate() - daysAgo);
-  return date.toISOString();
+  return beijingDayStart(daysAgo, now);
 }
 
 function delta(current: number | null, previous: number | null): number | null {
@@ -72,6 +70,8 @@ export class ReadModel {
         );
       };
       metrics[metric] = {
+        capturedAt: current.capturedAt,
+        origin: current.origin,
         current: current.value,
         day: delta(current.value, baseline(0)),
         week: delta(current.value, baseline(6)),
@@ -94,13 +94,17 @@ export class ReadModel {
       likes: l.get(date) ?? null,
       plays: p.get(date) ?? null,
     }));
+    const works = this.store.metrics.workSummary(accountId);
+    if (works.capturedAt && (!capturedAt || works.capturedAt > capturedAt)) capturedAt = works.capturedAt;
     return {
       accountId,
+      collectedWorkCount: works.count,
+      workTotals: works.totals,
       platformId: account.platformId,
       capturedAt,
       metrics,
       trend: fillForward(trend),
-      lastRun: this.store.metrics.lastRun(accountId),
+      lastRun: this.store.metrics.lastAttemptedRun(accountId),
     };
   }
 
@@ -150,6 +154,7 @@ export class ReadModel {
   }
 
   private summarize(platformId: PlatformId, accounts: Account[], days: number): PlatformSummaryView {
+    const coverage: Partial<Record<MetricName, number>> = {};
     const now = Date.now();
     const totals: Partial<Record<MetricName, number>> = {};
     const dayDelta: Partial<Record<MetricName, number>> = {};
@@ -158,6 +163,7 @@ export class ReadModel {
       for (const metric of TOTAL_METRICS) {
         const value = view.metrics[metric];
         if (!value || value.current == null) continue;
+        coverage[metric] = (coverage[metric] ?? 0) + 1;
         totals[metric] = (totals[metric] ?? 0) + value.current;
         if (value.day != null) dayDelta[metric] = (dayDelta[metric] ?? 0) + value.day;
       }
@@ -175,6 +181,7 @@ export class ReadModel {
     void now;
     return {
       platformId,
+      coverage,
       accountCount: accounts.length,
       onlineCount: accounts.filter((a) => a.status === "online" || a.status === "expiring").length,
       totals,

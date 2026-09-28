@@ -1,6 +1,7 @@
 import type { WebContents } from "electron";
 import { randomUUID } from "node:crypto";
-import type { Account, MetricName, MetricSnapshot, Work } from "@shared/types";
+import type { CollectionProgress } from "@shared/collect-jobs";
+import { WORK_METRICS, type Account, type MetricName, type MetricSnapshot, type Work, type WorkMetric, type MetricOrigin } from "@shared/types";
 import type { PlatformId } from "@shared/platforms";
 import type { ProfileInfo } from "@main/services/account-service";
 import { evaluateWithLease } from "@main/network/page-evaluation";
@@ -12,12 +13,18 @@ import {
 } from "@main/network/business-access";
 
 export interface CollectorContext {
+  progress?: CollectionProgress;
+  pageResult?: WorkPageInfo;
+  skipProfile?: boolean;
+  /** In-memory request from the same live document; never sent through IPC or persisted. */
+  observedWorksRequest?: () => { url: string; method: string; body?: string } | null;
   webContents: WebContents;
   account: Account;
   identityProfile?: CollectorProfile | null;
 }
 
 export interface CollectorProfile extends ProfileInfo {
+  origins?: Partial<Record<MetricName, MetricOrigin>>;
   followers?: number | null;
   following?: number | null;
   likes?: number | null;
@@ -29,12 +36,57 @@ export interface CollectorProfile extends ProfileInfo {
 }
 
 export interface CollectorResult {
+  page?: WorkPageInfo;
   profile: CollectorProfile | null;
   metrics: MetricSnapshot[];
   works: Work[];
   warnings: string[];
   loggedOut: boolean;
   rateLimited: boolean;
+}
+export interface WorkPageInfo {
+  receivedCount?: number;
+  nextCursor: string;
+  nextPage: number;
+  hasMore: boolean | null;
+  total?: number;
+  variant?: number;
+  reason?: string;
+}
+
+/** Keep the selected API variant stable across pages; a new variant may use different cursors. */
+export async function worksJson(ctx: CollectorContext, candidates: Parameters<typeof firstJson>[1], accept: (json: any) => boolean): Promise<any> {
+  const variant = ctx.progress?.variant;
+  const indexes = variant === undefined ? candidates.map((_, i) => i) : [variant];
+  for (const index of indexes) {
+    if (!candidates[index]) continue;
+    const json = await firstJson(ctx.webContents, [candidates[index]], accept);
+    if (json) {
+      ctx.pageResult = { nextPage: (ctx.progress?.page ?? 1) + 1, nextCursor: "", hasMore: null, variant: index };
+      return json;
+    }
+  }
+  return null;
+}
+export function recordWorksPage(ctx: CollectorContext, json: unknown, list: unknown[], kind: "page" | "cursor", cursorPaths: string[] = []): void {
+  const total = toNumber(firstDefined(json, ["data.totalCount", "data.total_count", "data.total", "total", "total_count", "data.page.count"]));
+  const more = firstDefined(json, ["has_more", "hasMore", "data.has_more", "data.hasMore", "data.hasNext"]);
+  const cursorValue = firstDefined(json, cursorPaths);
+  const cursor = cursorValue == null ? "" : String(cursorValue);
+  let hasMore: boolean | null = more === true || more === 1 || more === "1" ? true : more === false || more === 0 || more === "0" ? false : null;
+  if (list.length === 0 && hasMore === true) {
+    ctx.pageResult = { ...ctx.pageResult, receivedCount: 0, nextPage: ctx.progress?.page ?? 1, nextCursor: ctx.progress?.cursor ?? "", hasMore: null,
+      reason: "平台返回空页但仍声明存在后续作品，请重新核对分页" };
+    return;
+  }
+  if (list.length === 0 && hasMore !== true) hasMore = false;
+  if (cursor.toLowerCase() === "no_more") hasMore = false;
+  if (hasMore === null && (kind === "page" || cursor)) hasMore = true;
+  if (kind === "cursor" && hasMore !== false && (!cursor || cursor === (ctx.progress?.cursor ?? ""))) hasMore = null;
+  ctx.pageResult = { ...ctx.pageResult, receivedCount: list.length, nextPage: (ctx.progress?.page ?? 1) + 1, nextCursor: cursor, hasMore,
+    ...(total != null && total >= 0 ? { total } : {}),
+    ...(hasMore === null ? { reason: "分页游标未提供或未前进，已保留数据，请在官方作品页复核" } : {}),
+  };
 }
 
 export interface Collector {
@@ -46,14 +98,21 @@ export interface Collector {
 }
 
 export interface PageResponse {
+  retryAfterMs?: number;
   ok: boolean;
   status: number;
   text: string;
   url: string;
 }
+let diagnosticSink: ((entry: { accountId: string; stage: "request" | "response"; code: string; status?: number }) => void) | undefined;
+export function setCollectorDiagnosticSink(sink: typeof diagnosticSink): void { diagnosticSink = sink; }
+function requestDiagnostic(wc: WebContents, stage: "request" | "response", code: string, status?: number): void {
+  if (!diagnosticSink) return;
+  try { diagnosticSink({ accountId: accountForWebContents(wc), stage, code, ...(status == null ? {} : { status }) }); } catch { /* best effort */ }
+}
 
 export class RateLimitedError extends Error {
-  constructor(message = "rate-limited") {
+  constructor(message = "rate-limited", readonly retryAfterMs = 0) {
     super(message);
     this.name = "RateLimitedError";
   }
@@ -117,17 +176,22 @@ export async function pageFetch(
           signal: controller.signal,
         });
         const text = await response.text();
-        return { ok: response.ok, status: response.status, text: text.slice(0, 2_000_000), url: response.url };
+        const retry = response.headers?.get('retry-after');
+        const delay = retry == null ? 0 : /^\\d+(?:\\.\\d+)?$/.test(retry.trim()) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+        return { ok: response.ok, status: response.status, text: text.slice(0, 2_000_000), url: response.url,
+          retryAfterMs: Number.isFinite(delay) && delay > 0 ? delay : 0 };
       } catch (error) {
         return { ok: false, status: 0, text: String(error && error.message || error), url: ${JSON.stringify(url)} };
       } finally { pending.delete(id); }
     })()
   `;
-    const result = await evaluateWithLease<PageResponse>(wc, script, operation);
+    const result = await evaluateWithLease<PageResponse>(wc, script, operation, 20_000);
     operation.assertCurrent();
-    if (result.status === 429) throw new RateLimitedError();
+    if (result.status === 429) throw new RateLimitedError("rate-limited", result.retryAfterMs ?? 0);
     return result;
   } catch (error) {
+    cancel();
+    requestDiagnostic(wc, "request", error instanceof Error && error.message === "page-evaluation-timeout" ? "TIMEOUT" : "INTERRUPTED");
     operation.assertCurrent();
     throw error;
   } finally {
@@ -164,7 +228,9 @@ export async function firstJson<T = any>(
     try {
       const { json, status } = await pageJson<any>(wc, candidate.url, candidate.init);
       if (status === 401) throw new LoggedOutError();
-      if (json && accept(json)) return json as T;
+      if (json && [300330, 300333, 300334].includes(Number(pick(json, "errCode")))) throw new LoggedOutError();
+      if (status >= 200 && status < 300 && json && accept(json)) return json as T;
+      requestDiagnostic(wc, "response", status >= 400 ? "HTTP_ERROR" : json ? "SCHEMA_MISMATCH" : "INVALID_JSON", status);
     } catch (error) {
       if (
         error instanceof RateLimitedError ||
@@ -270,15 +336,20 @@ export async function domScrapeNumbers(
       const nodes = Array.from(document.querySelectorAll("body *")).filter((el) => el.children.length === 0 && el.textContent && el.textContent.trim().length <= 12);
       const textOf = (el) => (el.textContent || "").trim();
       for (const [metric, names] of Object.entries(labels)) {
-        for (const el of nodes) {
+        const matches = nodes.filter(el => names.includes(textOf(el)) && !el.closest('tr,[role=row],a,button'));
+        if (matches.length !== 1) continue;
+        for (const el of matches) {
           const text = textOf(el);
           if (!names.includes(text)) continue;
           const candidates = [];
           let scope = el.parentElement;
           for (let depth = 0; depth < 3 && scope; depth += 1, scope = scope.parentElement) {
+            if (/今日|昨日|近\\s*\\d+\\s*天|过去\\s*\\d+\\s*天/.test(scope.textContent || '')) break;
             candidates.push(...Array.from(scope.querySelectorAll("*")).filter((c) => c !== el && c.children.length === 0));
+            if (candidates.some(c => numberPattern.test(textOf(c)))) break;
           }
-          const hit = candidates.find((c) => numberPattern.test(textOf(c)));
+          const numbers = candidates.filter((c) => numberPattern.test(textOf(c)));
+          const hit = numbers.length === 1 ? numbers[0] : null;
           if (hit) { out[metric] = textOf(hit); break; }
         }
       }
@@ -286,7 +357,7 @@ export async function domScrapeNumbers(
     })()
   `;
   try {
-    const raw = await evaluateWithLease<Record<string, string>>(wc, script, operation);
+    const raw = await evaluateWithLease<Record<string, string>>(wc, script, operation, 5_000);
     operation.assertCurrent();
     const parsed: Partial<Record<MetricName, number>> = {};
     for (const [metric, text] of Object.entries(raw)) {
@@ -314,6 +385,21 @@ export const DEFAULT_LABELS: Record<MetricName, string[]> = {
   works: ["作品", "作品数", "视频", "视频数", "笔记"],
 };
 
+export function completeProfile(profile: CollectorProfile | null, scraped: Partial<Record<MetricName, number>>, warnings: string[]): CollectorProfile | null {
+  const names = Object.keys(DEFAULT_LABELS) as MetricName[];
+  if (profile && names.every((name) => profile[name] != null)) return profile;
+  const merged: CollectorProfile = { ...profile, origins: { ...profile?.origins } };
+  let added = false;
+  for (const name of names) if (merged[name] == null && scraped[name] != null) {
+    merged[name] = scraped[name];
+    merged.origins![name] = "page";
+    added = true;
+  }
+  if (added) warnings.push("部分数据从页面读取");
+  if (!profile && !added) { warnings.push("无法读取账号概览"); return null; }
+  return merged;
+}
+
 export function profileToMetrics(
   account: Account,
   profile: CollectorProfile,
@@ -338,6 +424,7 @@ export function profileToMetrics(
       value: value as number,
       capturedAt,
       source: "session" as const,
+      origin: profile.origins?.[metric] ?? "official",
       workId: null,
     }));
 }
@@ -353,6 +440,8 @@ export function worksToMetrics(works: Work[], capturedAt: string): MetricSnapsho
       ["favorites", work.favorites],
     ];
     for (const [metric, value] of pairs) {
+      if (work.observations && !work.observations[metric as WorkMetric]) continue;
+      if (!Number.isFinite(value)) continue;
       out.push({
         accountId: work.accountId,
         platformId: work.platformId,
@@ -360,6 +449,7 @@ export function worksToMetrics(works: Work[], capturedAt: string): MetricSnapsho
         value,
         capturedAt,
         source: "session",
+        origin: work.observations?.[metric as WorkMetric]?.origin ?? "legacy",
         workId: work.id,
       });
     }
@@ -370,10 +460,13 @@ export function worksToMetrics(works: Work[], capturedAt: string): MetricSnapsho
 export function makeWork(
   account: Account,
   remoteId: string,
-  partial: Partial<Work>,
+  partial: Omit<Partial<Work>, WorkMetric> & Partial<Record<WorkMetric, number | null>>,
   fetchedAt: string,
 ): Work {
   return {
+    observations: Object.fromEntries(WORK_METRICS.filter((metric) =>
+      typeof partial[metric] === "number" && Number.isFinite(partial[metric]),
+    ).map((metric) => [metric, { capturedAt: fetchedAt, origin: "official" as const }])),
     id: `${account.id}:${remoteId}`,
     accountId: account.id,
     platformId: account.platformId,
@@ -389,18 +482,6 @@ export function makeWork(
     shares: partial.shares ?? 0,
     favorites: partial.favorites ?? 0,
     fetchedAt,
-  };
-}
-
-/** Sum work-level totals when the platform gives no account-level counters. */
-export function aggregateFromWorks(
-  works: Work[],
-): Pick<CollectorProfile, "plays" | "comments" | "shares" | "favorites"> {
-  return {
-    plays: works.reduce((sum, w) => sum + w.plays, 0),
-    comments: works.reduce((sum, w) => sum + w.comments, 0),
-    shares: works.reduce((sum, w) => sum + w.shares, 0),
-    favorites: works.reduce((sum, w) => sum + w.favorites, 0),
   };
 }
 

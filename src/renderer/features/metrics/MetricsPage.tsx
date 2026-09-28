@@ -1,3 +1,4 @@
+import { workMetric } from "@shared/metric-quality";
 import { useEffect, useMemo, useState } from "react";
 import { PlatformLogo } from "@renderer/components/ui/PlatformLogo";
 import {
@@ -40,6 +41,7 @@ import layout from "@renderer/features/layout/layout.module.css";
 import styles from "./metrics.module.css";
 import { showCollectAccepted } from "./collect-feedback";
 import { WorkLink } from "./WorkLink";
+import { BusinessAnalyticsPanel } from "./BusinessAnalyticsPanel";
 
 type SortKey = "followers" | "likes" | "plays" | "comments" | "works" | "dayFollowers";
 type Range = 7 | 30 | 90;
@@ -62,7 +64,7 @@ export function MetricsPage() {
 
   if (detailId && accounts.some((account) => account.id === detailId))
     return (
-      <AccountDetail accountId={detailId} range={range} onBack={() => setDetailId(null)} onRange={setRange} />
+      <AccountDetail key={detailId} accountId={detailId} range={range} onBack={() => setDetailId(null)} onRange={setRange} />
     );
 
   return (
@@ -192,24 +194,28 @@ function PlatformTable({
         />
         <SummaryCell
           label="粉丝合计"
+          sub={data ? `${data.coverage?.followers ?? 0}/${data.accountCount} 个账号有值` : undefined}
           value={data?.totals.followers}
           delta={data?.dayDelta.followers}
           loading={!data}
         />
         <SummaryCell
           label="获赞合计"
+          sub={data ? `${data.coverage?.likes ?? 0}/${data.accountCount} 个账号有值` : undefined}
           value={data?.totals.likes}
           delta={data?.dayDelta.likes}
           loading={!data}
         />
         <SummaryCell
           label="评论合计"
+          sub={data ? `${data.coverage?.comments ?? 0}/${data.accountCount} 个账号有值` : undefined}
           value={data?.totals.comments}
           delta={data?.dayDelta.comments}
           loading={!data}
         />
         <SummaryCell
           label="播放合计"
+          sub={data ? `${data.coverage?.plays ?? 0}/${data.accountCount} 个账号有值` : undefined}
           value={data?.totals.plays}
           delta={data?.dayDelta.plays}
           loading={!data}
@@ -397,11 +403,13 @@ function AccountDetail({
   const [view, setView] = useState<AccountMetricsView | null>(null);
   const [works, setWorks] = useState<Work[] | null>(null);
   const [collecting, setCollecting] = useState(false);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [detailSection, setDetailSection] = useState<"basic" | "business">("basic");
 
   useEffect(() => {
     let cancelled = false;
     const load = () =>
-      Promise.all([api.metrics.account(accountId, range), api.works.list(accountId, 60)])
+      Promise.all([api.metrics.account(accountId, range), api.works.list(accountId, 50, pageIndex * 50)])
         .then(([v, w]) => {
           if (cancelled) return;
           setView(v);
@@ -414,9 +422,9 @@ function AccountDetail({
       cancelled = true;
       off();
     };
-  }, [accountId, range]);
+  }, [accountId, range, pageIndex]);
 
-  const topWorks = useMemo(() => [...(works ?? [])].sort((a, b) => b.plays - a.plays).slice(0, 12), [works]);
+  const topWorks = useMemo(() => [...(works ?? [])].sort((a, b) => (workMetric(b, "plays") ?? -1) - (workMetric(a, "plays") ?? -1)), [works]);
 
   if (!account) return null;
   const platform = PLATFORMS[account.platformId];
@@ -448,15 +456,16 @@ function AccountDetail({
           badge={<PlatformLogo platformId={platform.id} size={16} />}
           badgeColor={platform.color}
         />
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div className={styles.detailIdentity}>
           <h2>{account.displayName}</h2>
           <p>
             <Badge tone={STATUS_TONE[account.status]}>{STATUS_LABEL[account.status]}</Badge>
             {"  "}
-            {account.handle ? `@${account.handle} · ` : ""}上次采集{" "}
-            {formatRelative(view?.lastRun?.finishedAt ?? view?.capturedAt)}
+            {account.handle ? `@${account.handle} · ` : ""}最后成功更新{" "}
+            {formatRelative(view?.capturedAt)} · 最后尝试 {formatRelative(view?.lastRun?.finishedAt)}
           </p>
         </div>
+        <div className={styles.detailActions}>
         <Tabs
           value={range}
           onChange={onRange}
@@ -469,11 +478,18 @@ function AccountDetail({
         <Button icon={RefreshCw} loading={collecting} onClick={collect}>
           立即采集
         </Button>
+        <Button onClick={() => void api.metrics.collectHistory(accountId).then(() =>
+          useToasts.getState().push({ kind: "info", title: "历史补采已加入队列" })).catch((error: Error) =>
+          useToasts.getState().push({ kind: "error", title: "无法启动历史补采", message: error.message }))}>补齐历史作品</Button>
         <Button variant="primary" icon={ExternalLink} onClick={() => openAccount(accountId)}>
           打开账号页面
         </Button>
+        </div>
       </div>
 
+      <div style={{ marginBottom: 16 }}><Tabs value={detailSection} onChange={setDetailSection}
+        items={[{ value: "basic", label: "基础数据" }, { value: "business", label: "经营分析" }]} /></div>
+      {detailSection === "business" ? <BusinessAnalyticsPanel accountId={accountId} /> : <>
       <div className={styles.detailGrid}>
         {(["followers", "likes", "plays", "comments"] as const).map((key) => (
           <Card key={key} className={styles.detailKpi}>
@@ -483,6 +499,7 @@ function AccountDetail({
             ) : (
               <Skeleton height={28} width={100} style={{ marginTop: 6 }} />
             )}
+            <small>{m[key]?.current == null ? "尚未取得该指标" : "更新 " + formatRelative(m[key]?.capturedAt) + " · " + (m[key]?.origin === "official" ? "官方接口" : m[key]?.origin === "page" ? "页面读取" : "历史记录，来源未验证")}</small>
             <div className={styles.deltaRow}>
               <span>
                 <b>日</b>
@@ -594,9 +611,9 @@ function AccountDetail({
 
       <Card>
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
-          <strong style={{ fontSize: "var(--text-md)" }}>作品榜 · 按播放排序</strong>
+          <strong style={{ fontSize: "var(--text-md)" }}>作品列表 · 当前页按播放排序</strong>
           <span style={{ fontSize: "var(--text-xs)", color: "var(--fg-muted)" }}>
-            {works?.length ?? 0} 个作品
+            第 {pageIndex + 1} 页 · 本页 {works?.length ?? 0} 条 / 已采 {view?.collectedWorkCount ?? "—"} 条
           </span>
         </div>
         {works == null ? (
@@ -615,10 +632,10 @@ function AccountDetail({
                 <div style={{ minWidth: 0 }}>
                   <strong title={work.title}>{work.title || "(无标题)"}</strong>
                   <div className={styles.stats}>
-                    <span className="num">▶ {formatNumber(work.plays)}</span>
-                    <span className="num">♥ {formatNumber(work.likes)}</span>
-                    <span className="num">💬 {formatNumber(work.comments)}</span>
-                    <span className="num">↗ {formatNumber(work.shares)}</span>
+                    <span className="num">▶ {formatNumber(workMetric(work, "plays"))}</span>
+                    <span className="num">♥ {formatNumber(workMetric(work, "likes"))}</span>
+                    <span className="num">💬 {formatNumber(workMetric(work, "comments"))}</span>
+                    <span className="num">↗ {formatNumber(workMetric(work, "shares"))}</span>
                     <span>{formatDateTime(work.publishedAt)}</span>
                   </div>
                 </div>
@@ -626,7 +643,13 @@ function AccountDetail({
             ))}
           </div>
         )}
+        <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
+          <Button disabled={pageIndex === 0} onClick={() => setPageIndex((n) => n - 1)}>上一页</Button>
+          <Button disabled={(pageIndex + 1) * 50 >= (view?.collectedWorkCount ?? 0)} onClick={() => setPageIndex((n) => n + 1)}>下一页</Button>
+          <span>已采作品播放合计：{formatNumber(view?.workTotals?.plays)}（含历史值，范围以已采作品为准）</span>
+        </div>
       </Card>
+      </>}
     </div>
   );
 }

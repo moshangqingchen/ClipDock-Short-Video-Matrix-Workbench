@@ -1,3 +1,4 @@
+import { workMetric } from "@shared/metric-quality";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
@@ -99,7 +100,7 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
     }
   };
 
-  const topWorks = useMemo(() => [...(works ?? [])].sort((a, b) => b.plays - a.plays).slice(0, 8), [works]);
+  const topWorks = useMemo(() => [...(works ?? [])].sort((a, b) => (workMetric(b, "plays") ?? -1) - (workMetric(a, "plays") ?? -1)).slice(0, 8), [works]);
   const online = account.status === "online" || account.status === "expiring";
   const m = view?.metrics ?? {};
 
@@ -116,7 +117,7 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
           </h2>
           <p>
             数据来自该账号自己的登录会话,只读不写 · 上次采集{" "}
-            {formatRelative(view?.lastRun?.finishedAt ?? view?.capturedAt)}
+            {formatRelative(view?.capturedAt)}
             {view?.lastRun?.message ? ` · ${view.lastRun.message}` : ""}
           </p>
         </div>
@@ -311,10 +312,10 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
                     <div className={styles.workMeta}>
                       <strong title={work.title}>{work.title || "(无标题)"}</strong>
                       <span>
-                        <em className="num">▶ {formatNumber(work.plays)}</em>
-                        <em className="num">♥ {formatNumber(work.likes)}</em>
-                        <em className="num">💬 {formatNumber(work.comments)}</em>
-                        <em className="num">↗ {formatNumber(work.shares)}</em>
+                        <em className="num">▶ {formatNumber(workMetric(work, "plays"))}</em>
+                        <em className="num">♥ {formatNumber(workMetric(work, "likes"))}</em>
+                        <em className="num">💬 {formatNumber(workMetric(work, "comments"))}</em>
+                        <em className="num">↗ {formatNumber(workMetric(work, "shares"))}</em>
                         <em>{formatDateTime(work.publishedAt)}</em>
                       </span>
                     </div>

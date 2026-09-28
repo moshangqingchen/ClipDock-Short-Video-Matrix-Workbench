@@ -408,4 +408,30 @@ export const MIGRATIONS: readonly Migration[] = [
     name: "account-check-observations",
     sql: "ALTER TABLE accounts ADD COLUMN check_info_json TEXT;",
   },
+  {
+    version: 16,
+    name: "collection-quality-and-progress",
+    sql: `
+      ALTER TABLE works ADD COLUMN observations_json TEXT;
+      ALTER TABLE metric_snapshots ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy';
+      ALTER TABLE cn_jobs ADD COLUMN progress_json TEXT;
+      ALTER TABLE cn_jobs ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE cn_jobs ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
+      CREATE TABLE collection_seen(job_id TEXT NOT NULL REFERENCES cn_jobs(id) ON DELETE CASCADE,
+        remote_id TEXT NOT NULL, PRIMARY KEY(job_id,remote_id));
+      CREATE TABLE collection_platform_backoff(platform_id TEXT PRIMARY KEY,not_before INTEGER NOT NULL);
+    `,
+  },
+  {
+    version: 17,
+    name: "domestic-business-analytics",
+    sql: `CREATE TABLE business_analytics (
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      record_key TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, captured_at TEXT NOT NULL,
+      record_json TEXT NOT NULL CHECK(length(record_json)<32768), PRIMARY KEY(account_id,record_key)
+    );
+    CREATE INDEX business_analytics_dates ON business_analytics(account_id,end_date);
+    CREATE TABLE analytics_platforms(platform_id TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)));
+    CREATE TABLE analytics_status(account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,states_json TEXT NOT NULL,attempted_at TEXT NOT NULL);`,
+  },
 ];

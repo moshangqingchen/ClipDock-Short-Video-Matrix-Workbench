@@ -44,7 +44,9 @@ import { registerPublishHandlers } from "./ipc/handlers/publish";
 import { registerBackupHandlers } from "./ipc/handlers/backup";
 import { createNotifier } from "./notifications";
 import { CollectScheduler } from "./data/scheduler";
+import { BusinessAnalyticsService } from "./data/business-analytics-service";
 import { createCollectorRegistry } from "./data/collectors";
+import { setCollectorDiagnosticSink } from "./data/collectors/shared";
 import { AssetService, registerAssetSchemePrivileges } from "./services/asset-service";
 import { toChromeUserAgent } from "./browser/user-agent";
 import { PublishService } from "./services/publish-service";
@@ -494,6 +496,13 @@ async function bootstrap(): Promise<void> {
   powerMonitor.on("resume", resumeNetwork);
 
   const pool = new ViewPool({
+    onQrDiagnostic: (accountId, diagnostic) => store.audit.append({
+      action: "login.qr", accountId, details: { ...diagnostic, version: app.getVersion() },
+    }),
+    onCookieDiagnostic: (accountId, diagnostic) => store.audit.append({
+      action: "session.persistence", accountId,
+      details: { ...diagnostic, version: app.getVersion(), dataDirectoryId: createHash("sha256").update(userDataPath).digest("hex").slice(0, 16) },
+    }),
     window: mainWindow.window,
     maxLive: settings.maxLiveViews,
     onActivity: (accountId, reason) => accounts.onActivity(accountId, reason),
@@ -501,6 +510,7 @@ async function bootstrap(): Promise<void> {
   pool.on("state", (state) => ipc.send(IPC.evViewState, state));
 
   const collectors = createCollectorRegistry();
+  setCollectorDiagnosticSink(({ accountId, ...details }) => store.audit.append({ action: "collection.request", accountId, details }));
 
   const accounts = new AccountService({
     store,
@@ -540,7 +550,9 @@ async function bootstrap(): Promise<void> {
     ipc.send(IPC.evAccountsReloaded, null);
   });
 
+  const analytics = new BusinessAnalyticsService(store, pool, accounts, (accountId) => ipc.send(IPC.evMetricsUpdated, { accountId }));
   const scheduler = new CollectScheduler({
+    analytics,
     store,
     pool,
     collectors,
@@ -670,7 +682,7 @@ async function bootstrap(): Promise<void> {
     pool,
     onSettingsChanged: (next) => scheduler.applySettings(next),
   });
-  registerMetricsHandlers(ipc, { store, scheduler, accounts, media });
+  registerMetricsHandlers(ipc, { store, scheduler, accounts, media, analytics });
   registerAssetHandlers(ipc, assetService, mainWindow.window);
   registerPublishHandlers(ipc, publishService);
   registerBackupHandlers(ipc, {
@@ -831,15 +843,15 @@ app.on("before-quit", (event) => {
         ["network observer", () => rt.network.stop()],
         ["scheduler", () => rt.scheduler.stop()],
         ["account tasks", () => rt.accounts.dispose()],
-        ["network sessions", () => rt.disposeNetwork()],
         [
           "account cookies",
           () =>
             Promise.race([
               flushAccountSessionCookies(),
-              new Promise((resolve) => setTimeout(resolve, 2_500)),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("COOKIE_FLUSH_TIMEOUT")), 7_000)),
             ]),
         ],
+        ["network sessions", () => rt.disposeNetwork()],
         ["account views", () => rt.pool.dispose()],
         ["IPC", () => rt.ipc.dispose()],
         ["database", () => rt.store.close()],
@@ -850,6 +862,9 @@ app.on("before-quit", (event) => {
         } catch {
           // Native errors can include account URLs; log only the failed stage.
           console.error(`Application shutdown step failed: ${name}`);
+          if (name !== "database") {
+            try { rt.store.audit.append({ action: "shutdown.failed", details: { stage: name } }); } catch { /* best effort */ }
+          }
         }
       }
     } finally {

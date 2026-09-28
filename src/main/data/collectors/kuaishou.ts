@@ -1,8 +1,8 @@
 import type { Work } from "@shared/types";
 import { PLATFORMS } from "@shared/platforms";
 import {
+  completeProfile,
   DEFAULT_LABELS,
-  aggregateFromWorks,
   domScrapeNumbers,
   emptyResult,
   firstDefined,
@@ -14,6 +14,8 @@ import {
   toIso,
   toNumber,
   worksToMetrics,
+  worksJson,
+  recordWorksPage,
   type Collector,
   type CollectorContext,
   type CollectorProfile,
@@ -75,16 +77,16 @@ async function readProfile(ctx: CollectorContext): Promise<CollectorProfile | nu
 }
 
 async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work[] | null> {
-  const body = JSON.stringify({ pcursor: "", count: 30, status: 0, sortType: 1, keyword: "" });
-  const json = await firstJson(
-    ctx.webContents,
+  const body = JSON.stringify({ pcursor: ctx.progress?.cursor ?? "", count: 30, status: 0, sortType: 1, keyword: "" });
+  const json = await worksJson(
+    ctx,
     [
       {
         url: `${BASE}/rest/cp/works/v2/video/pc/photo/list`,
         init: { method: "POST", headers: JSON_HEADERS, body },
       },
       {
-        url: `${BASE}/rest/cp/works/v2/video/pc/photo/list?pcursor=&count=30`,
+        url: `${BASE}/rest/cp/works/v2/video/pc/photo/list?pcursor=${encodeURIComponent(ctx.progress?.cursor ?? "")}&count=30`,
         init: { method: "GET", headers: JSON_HEADERS },
       },
       { url: `${BASE}/rest/pc/works/photo/list`, init: { method: "POST", headers: JSON_HEADERS, body } },
@@ -96,6 +98,7 @@ async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work
   );
   if (!json) return null;
   const list = (pick(json, "data.list") ?? pick(json, "list") ?? pick(json, "data.photoList")) as any[];
+  recordWorksPage(ctx, json, list, "cursor", ["data.pcursor","pcursor"]);
   return list
     .map((item) => {
       const remoteId = String(firstDefined(item, ["photoId", "id", "workId"]) ?? "");
@@ -109,11 +112,11 @@ async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work
           url: `https://www.kuaishou.com/short-video/${remoteId}`,
           publishedAt: toIso(firstDefined(item, ["timestamp", "publishTime", "createTime", "uploadTime"])),
           status: String(firstDefined(item, ["statusDesc", "status", "auditStatus"]) ?? "") || null,
-          plays: toNumber(firstDefined(item, ["viewCount", "playCount", "displayViewCount"])) ?? 0,
-          likes: toNumber(firstDefined(item, ["likeCount", "displayLikeCount"])) ?? 0,
-          comments: toNumber(firstDefined(item, ["commentCount", "displayCommentCount"])) ?? 0,
-          shares: toNumber(firstDefined(item, ["shareCount", "forwardCount"])) ?? 0,
-          favorites: toNumber(firstDefined(item, ["collectCount", "favoriteCount"])) ?? 0,
+          plays: toNumber(firstDefined(item, ["viewCount", "playCount", "displayViewCount"])),
+          likes: toNumber(firstDefined(item, ["likeCount", "displayLikeCount"])),
+          comments: toNumber(firstDefined(item, ["commentCount", "displayCommentCount"])),
+          shares: toNumber(firstDefined(item, ["shareCount", "forwardCount"])),
+          favorites: toNumber(firstDefined(item, ["collectCount", "favoriteCount"])),
         },
         fetchedAt,
       );
@@ -132,26 +135,15 @@ export const kuaishouCollector: Collector = {
   async collect(ctx): Promise<CollectorResult> {
     const result = emptyResult();
     const capturedAt = new Date().toISOString();
-    let profile = await readProfile(ctx);
-    if (!profile) {
-      const scraped = await domScrapeNumbers(ctx.webContents, DEFAULT_LABELS);
-      if (Object.keys(scraped).length) {
-        profile = {
-          followers: scraped.followers ?? null,
-          likes: scraped.likes ?? null,
-          works: scraped.works ?? null,
-        };
-        result.warnings.push("接口不可用,已从页面读取概览数据");
-      } else {
-        result.warnings.push("无法读取账号概览");
-      }
-    }
+    let profile = ctx.skipProfile ? null : await readProfile(ctx);
+    if (!ctx.skipProfile) profile = completeProfile(profile, await domScrapeNumbers(ctx.webContents, DEFAULT_LABELS), result.warnings);
     const fetchedWorks = await readWorks(ctx, capturedAt);
     if (fetchedWorks === null) result.warnings.push("作品接口不可用");
     const works = fetchedWorks ?? [];
-    if (profile && works.length) profile = { ...profile, ...aggregateFromWorks(works) };
     result.profile = profile;
     result.works = works;
+    result.page = ctx.pageResult;
+    if (result.page?.hasMore === null) result.warnings.push(result.page.reason ?? "分页范围未确认");
     result.metrics = [
       ...(profile ? profileToMetrics(ctx.account, profile, capturedAt) : []),
       ...worksToMetrics(works, capturedAt),

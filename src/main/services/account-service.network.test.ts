@@ -98,15 +98,57 @@ describe("Channels recovery and failed-page authentication", () => {
 
   it.each([
     { url: "https://channels.weixin.qq.com/platform/post/create", visible: false },
+    { url: "https://channels.weixin.qq.com/platform/post/create", visible: false, lastError: "ERR_TIMED_OUT" },
+    { url: "https://channels.weixin.qq.com/platform/post/create", visible: true, lastError: "ERR_TIMED_OUT" },
     { url: "https://channels.weixin.qq.com/login.html", visible: true },
+    { url: "https://channels.weixin.qq.com/login.html", visible: false, lastError: "ERR_TIMED_OUT" },
     { url: "https://channels.weixin.qq.com/platform", visible: true },
+    { url: "https://channels.weixin.qq.com/platform/post/list", visible: true },
     { url: "https://captcha.qq.com/verify", visible: false },
+    { url: "https://channels.weixin.qq.com/platform/unknown", visible: false },
   ])("does not replace an active page or hidden editor during background refresh: $url", async page => {
     const f = fixture("online", true, undefined, "weixin_channels");
     f.viewPool.getState.mockReturnValue({ ...page, loading: false } as ViewState);
     await f.service.checkStatus(f.account.id, { force: true, refreshPage: true });
     expect(f.viewPool.navigate).not.toHaveBeenCalled();
     expect(browser.wipe).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://channels.weixin.qq.com/platform?tab=home",
+    "https://channels.weixin.qq.com/platform/post/list",
+    "https://channels.weixin.qq.com/platform/post/list/?page=2",
+    "https://channels.weixin.qq.com/platform/statistic/post",
+    "https://channels.weixin.qq.com/platform/comment",
+  ])("refreshes an idle hidden read-only Channels route for fresh identity: %s", async url => {
+    const f = fixture("online", true, undefined, "weixin_channels");
+    f.viewPool.getState.mockReturnValue({ url, visible: false, loading: false, instanceId: 1, navigationId: 1 } as ViewState);
+    f.viewPool.navigate.mockImplementation(async () => {
+      f.viewPool.getState.mockReturnValue({ url: getPlatform("weixin_channels").routes.home, visible: false, loading: false, instanceId: 1, navigationId: 2 } as ViewState);
+      f.viewPool.getIdentityEvidence.mockReturnValue({ kind: "online", key: "fresh-safe-page", sequence: 1,
+        observedAt: Date.now(), reason: "平台网页已确认登录身份", subject: "self" });
+    });
+    const checked = await f.service.checkStatus(f.account.id, { force: true, refreshPage: true });
+    expect(f.viewPool.navigate).toHaveBeenCalledExactlyOnceWith(f.account.id, getPlatform("weixin_channels").routes.home);
+    expect(checked).toMatchObject({ status: "online", checkInfo: { state: "confirmed" } });
+    expect(f.session.fetch).not.toHaveBeenCalled();
+  });
+
+  it("records the login-page basis separately from an identity response without retaining credentials", async () => {
+    const f = fixture("online", true, undefined, "weixin_channels");
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("weixin_channels").routes.login, loading: false } as ViewState);
+    await f.service.checkStatus(f.account.id, { force: true });
+    await vi.advanceTimersByTimeAsync(3000);
+    const logout = f.store.audit.list().find(event => event.action === "account.status");
+    expect(logout?.details).toEqual({ from: "online", to: "offline", probe: null,
+      source: "login-page", reason: "账号页面已跳转至登录页" });
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("weixin_channels").routes.home, loading: false } as ViewState);
+    f.viewPool.getIdentityEvidence.mockReturnValue({ kind: "online", key: "identity-resumed", sequence: 1,
+      observedAt: Date.now(), reason: "平台网页已确认登录身份", subject: "not-an-audit-field" });
+    await f.service.checkStatus(f.account.id, { force: true });
+    const login = f.store.audit.list().find(event => event.action === "account.status" && event.details?.to === "online");
+    expect(login?.details).toEqual({ from: "offline", to: "online", probe: null,
+      source: "identity-response", reason: "平台网页已确认登录身份" });
   });
 
   it("does not accept a late identity after revocation during a page refresh", async () => {
@@ -329,10 +371,23 @@ describe("foreground account homepage entry", () => {
     const prepare = vi.spyOn(f.service, "prepareNetworkOperation");
     const bounds = { x: 0, y: 0, width: 640, height: 480 };
     await f.service.showView(f.account.id, bounds);
-    expect(prepare).toHaveBeenCalledWith(f.account.id, "check-status", undefined);
+    expect(prepare).toHaveBeenCalledWith(f.account.id, "view-navigate", getPlatform("douyin").routes.home);
     expect(f.viewPool.show).toHaveBeenCalledWith(
       { id: f.account.id, platformId: "douyin" }, bounds, false,
     );
+  });
+
+  it.each([
+    "https://creator.douyin.com/creator-micro/content/upload",
+    "https://channels.weixin.qq.com/login.html",
+  ])("restores an existing page using its own origin even when account entry was requested: %s", async url => {
+    const platformId = url.includes("weixin") ? "weixin_channels" : "douyin";
+    const f = fixture("online", true, undefined, platformId);
+    f.viewPool.getState.mockReturnValue({ url, loading: false, lifecycle: "ready" } as ViewState);
+    const prepare = vi.spyOn(f.service, "prepareNetworkOperation");
+    await f.service.showView(f.account.id, { x: 0, y: 0, width: 640, height: 480 }, true);
+    expect(prepare).toHaveBeenCalledWith(f.account.id, "view-navigate", url);
+    expect(f.viewPool.navigate).not.toHaveBeenCalled();
   });
 
   it("restores a homepage and checks its login without requesting a creator API scope", async () => {
