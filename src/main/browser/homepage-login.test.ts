@@ -324,6 +324,46 @@ describe("homepage current-account avatar extraction", () => {
 });
 
 describe("homepage current-account login detection", () => {
+  const biliDefaultAvatar = '<a href="https://space.bilibili.com/1234"><img src="https://i0.hdslb.com/bfs/face/noface.jpg"></a>';
+  const biliAccountHeader = (content = biliDefaultAvatar) => `<div class="bili-header"><div class="header-avatar-wrap">${content}</div></div>`;
+  it.each([
+    ['standard header', biliAccountHeader()],
+    ['container header', `<div id="bili-header-container"><div class="header-avatar-wrap">${biliDefaultAvatar}</div></div>`],
+    ['mini header', `<div class="bili-mini-header"><a class="header-avatar-wrap" href="https://space.bilibili.com/1234"><img src="//i0.hdslb.com/bfs/face/default-avatar.png"></a></div>`],
+  ])("confirms Bilibili's positive-ID account with a default avatar in its %s without importing the placeholder", (_name, body) => {
+    const result = read("bilibili", body);
+    expect(result).toMatchObject({ kind: "online", source: "homepage" });
+    expect(result.avatarUrl).toBeUndefined();
+    expect(result).not.toHaveProperty("externalId");
+  });
+  it.each([
+    ['guest with no link', biliAccountHeader('<img src="/noface.jpg">')],
+    ['generic navigation', `<nav>${biliDefaultAvatar}</nav>`],
+    ['header link outside account control', `<div class="bili-header">${biliDefaultAvatar}</div>`],
+    ['unrelated sibling link', biliAccountHeader('<img src="/noface.jpg"><a href="https://space.bilibili.com/1234">作者</a>')],
+    ['author card', `<article>${biliAccountHeader()}</article>`],
+    ['feed content', `<main>${biliAccountHeader()}</main>`],
+    ['hidden header', `<div hidden>${biliAccountHeader()}</div>`],
+    ['hidden account link', biliAccountHeader(biliDefaultAvatar.replace('<a ', '<a aria-hidden="true" '))],
+    ['hidden image', biliAccountHeader(biliDefaultAvatar.replace('<img ', '<img style="visibility:hidden" '))],
+    ['missing image source', biliAccountHeader('<a href="https://space.bilibili.com/1234"><img></a>')],
+    ['zero ID', biliAccountHeader(biliDefaultAvatar.replace('/1234', '/0'))],
+    ['generic space root', biliAccountHeader(biliDefaultAvatar.replace('/1234', '/'))],
+    ['non-numeric ID', biliAccountHeader(biliDefaultAvatar.replace('/1234', '/self'))],
+    ['foreign space host', biliAccountHeader(biliDefaultAvatar.replace('space.bilibili.com', 'space.bilibili.com.evil.example'))],
+    ['explicit signed-out image', biliAccountHeader(biliDefaultAvatar.replace('noface.jpg', 'not-login.png'))],
+  ])("does not infer Bilibili login from a %s with a default avatar", (_name, body) => {
+    const result = read("bilibili", body);
+    expect(result.kind).toBe("unconfirmed");
+    expect(result.avatarUrl).toBeUndefined();
+  });
+  it("waits for Bilibili's default-avatar account control to settle during loading or conflicting guest UI", () => {
+    expect(read("bilibili", biliAccountHeader(), {}, { loading: true }).kind).toBe("unconfirmed");
+    expect(read("bilibili", biliAccountHeader() + '<div class="bili-header"><div class="header-login-entry">登录</div></div>').kind)
+      .toBe("unconfirmed");
+    expect(read("bilibili", biliAccountHeader('<img src="/noface.jpg">') + '<div class="bili-header"><div class="header-login-entry">登录</div></div>').kind)
+      .toBe("offline");
+  });
   const guestSidebar = '<div class="workbench"><main><div class="wb-left"><div class="sidebar"><div class="login-card"><div>登录即可享受</div><div>更懂你的优质内容</div><div>点赞评论收藏</div><div>更好交流互动</div><button>立即登录</button></div></div></div></main></div>';
   it("detects the visible Kuaishou guest sidebar even when its stale account store says online", () => {
     expect(read("kuaishou", guestSidebar, { __NUXT__: { state: { user: { isLogin: true, userInfo: { userId: "cached" } } } } }))
@@ -530,7 +570,7 @@ describe("homepage current-account login detection", () => {
     expect(
       read(
         "bilibili",
-        '<div class="bili-header"><div class="header-avatar-wrap"><a href="https://space.bilibili.com/1234"><img src="/noface.jpg"></a></div></div>',
+        '<div class="bili-header"><div class="header-avatar-wrap"><a href="https://space.bilibili.com/"><img src="/noface.jpg"></a></div></div>',
       ).kind,
     ).toBe("unconfirmed");
   });

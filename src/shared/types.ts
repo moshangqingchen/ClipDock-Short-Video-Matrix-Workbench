@@ -9,8 +9,8 @@ export type { PlatformId };
 /**
  * Account login state as observed by the main process.
  *
- * - `unknown`: never inspected (fresh account) or inspection failed.
- * - `online`: session cookies present and probe succeeded.
+ * - `unknown`: no applicable confirmed login observation yet.
+ * - `online`: the authoritative homepage or platform identity check confirmed login.
  * - `offline`: no valid session; login page expected.
  * - `needs_verification`: a captcha / risk-control page is showing.
  * - `expiring`: online but within the platform's warning window.
@@ -46,6 +46,14 @@ export interface AccountCheckInfo {
   state: "checking" | "confirmed" | "unconfirmed" | "network_error" | "paused";
   reason: string;
   attemptedAt: string;
+  /** Last explicit observation of this account's public homepage; unrelated checks preserve it. */
+  homepageConfirmation?: HomepageConfirmation | null;
+}
+
+export interface HomepageConfirmation {
+  kind: "online" | "offline";
+  /** Observation time in Unix milliseconds, never renewed by a cached-result read. */
+  observedAt: number;
 }
 
 export interface AccountCreateInput {

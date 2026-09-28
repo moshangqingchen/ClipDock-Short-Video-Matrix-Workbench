@@ -15,7 +15,8 @@ const PUBLIC_HOSTS: Partial<Record<PlatformId, string>> = {
   bilibili: "www.bilibili.com",
 };
 
-export const HOMEPAGE_CONFIRMATION_TTL_MS = 5 * 60_000;
+/** Schedule a fresh observation without expiring an existing homepage conclusion. */
+export const HOMEPAGE_RECHECK_INTERVAL_MS = 5 * 60_000;
 export function requiresHomepageLogin(platformId: PlatformId): boolean {
   return Boolean(getPlatform(platformId).routes.site);
 }
@@ -98,9 +99,10 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
       const text = node => (node.textContent || '').trim().replace(/\\s+/g, '');
       const image = root => Array.from(root.querySelectorAll('img')).some(img => visible(img) &&
         Boolean(img.getAttribute('src')) && !/(?:default[-_]?avatar|noface|not[-_]?login)/i.test(img.getAttribute('src')));
-      const safeAvatarUrl = value => {
+      const safeAvatarUrl = (value, allowDefault = false) => {
         if (typeof value !== 'string' || !value.trim() || value.length > 4096 ||
-            /(?:default[-_]?avatar|noface|not[-_]?login)/i.test(value)) return undefined;
+            /not[-_]?login/i.test(value) ||
+            !allowDefault && /(?:default[-_]?avatar|noface)/i.test(value)) return undefined;
         try {
           const url = new URL(value, location.href);
           if (url.protocol !== 'https:' || url.username || url.password || url.port) return undefined;
@@ -180,8 +182,15 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
       };
       const profileHost = platform === 'bilibili' ? 'space.bilibili.com' : host;
       const currentAccountRoots = elements(accountRoots[platform]);
-      let accountAvatar = currentAccountRoots.some(root =>
-        image(root) && profileLink(root, profilePatterns[platform], profileHost));
+      // Bilibili's signed-in accounts may keep the official default avatar.
+      // The visible positive-ID space link inside the dedicated account header
+      // establishes identity; a generic guest image or an unrelated link does not.
+      // Keep default images excluded from the separate avatar-import path below.
+      let accountAvatar = currentAccountRoots.some(root => platform === 'bilibili'
+        ? document.readyState !== 'loading' && accountLinks(root, profilePatterns[platform], profileHost).some(link =>
+            Array.from(link.querySelectorAll('img')).some(img => visible(img) &&
+              Boolean(safeAvatarUrl(img.currentSrc || img.getAttribute('src'), true))))
+        : image(root) && profileLink(root, profilePatterns[platform], profileHost));
       const domAvatars = new Set();
       for (const root of currentAccountRoots) {
         for (const link of accountLinks(root, profilePatterns[platform], profileHost)) {

@@ -119,7 +119,7 @@ describe("homepage authentication", () => {
     },
   );
 
-  it("does not keep an unconfirmed homepage green while it loads", async () => {
+  it("does not infer a homepage conclusion from an old online status while it loads", async () => {
     const probe = vi.fn(async () => ({ status: 401, text: "" }));
     const result = await detectLoginState({
       platformId: "xiaohongshu", session: fakeSession([]),
@@ -151,11 +151,69 @@ describe("homepage authentication", () => {
     expect(await detectLoginState({ ...input, homepageConfirmation: { kind: "online", observedAt: 599999 } }))
       .toMatchObject({ status: "online", unconfirmed: true });
     expect(await detectLoginState({ ...input, homepageConfirmation: { kind: "online", observedAt: 300000 } }))
-      .toMatchObject({ status: "unknown", unconfirmed: true });
+      .toMatchObject({ status: "online", unconfirmed: true });
     expect(await detectLoginState({ ...input, homepageConfirmation: { kind: "offline", observedAt: 599999 } }))
       .toMatchObject({ status: "offline", unconfirmed: true });
     expect(cookies).not.toHaveBeenCalled();
     expect(probe).not.toHaveBeenCalled();
+  });
+
+  it.each(["online", "offline"] as const)(
+    "preserves a confirmed %s homepage across loading, an unrecognised page and view eviction without renewing it",
+    async kind => {
+      const confirmation = Object.freeze({ kind, observedAt: 1000 });
+      const session = fakeSession([]);
+      const cookies = vi.spyOn(session.cookies, "get");
+      const probe = vi.fn(async () => ({ status: 200, text: "{}" }));
+      const input = { platformId: "kuaishou" as const, session, probe,
+        homepageConfirmation: confirmation, now: 24 * 60 * 60_000, previousStatus: "unknown" as const };
+      for (const state of [
+        { currentUrl: getPlatform("kuaishou").routes.site, loading: true,
+          homepage: { kind: kind === "online" ? "offline" as const : "online" as const, source: "homepage" as const, reason: "旧页面" } },
+        { currentUrl: getPlatform("kuaishou").routes.site,
+          homepage: { kind: "unconfirmed" as const, source: "homepage" as const, reason: "组件尚未加载" } },
+        { currentUrl: getPlatform("kuaishou").routes.site },
+        { currentUrl: null },
+      ]) {
+        const result = await detectLoginState({ ...input, ...state });
+        expect(result).toMatchObject({ status: kind, source: "homepage", unconfirmed: true });
+        expect(result.avatarUrl).toBeUndefined();
+        expect(result.sessionExpiresAt).toBeUndefined();
+      }
+      expect(confirmation.observedAt).toBe(1000);
+      expect(cookies).not.toHaveBeenCalled();
+      expect(probe).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["online", "offline"] as const)("lets a fresh explicit %s homepage replace the opposite cached conclusion", async kind => {
+    const result = await detectLoginState({
+      platformId: "kuaishou", session: fakeSession([]), currentUrl: getPlatform("kuaishou").routes.site,
+      homepageConfirmation: { kind: kind === "online" ? "offline" : "online", observedAt: 1000 },
+      homepage: { kind, source: "homepage", reason: "当前主页已确认" }, now: 600000,
+    });
+    expect(result).toMatchObject({ status: kind, source: "homepage", message: "当前主页已确认" });
+    expect(result.unconfirmed).toBeUndefined();
+  });
+
+  it.each([0, -1, NaN, Infinity, -Infinity, 600001])("does not accept a homepage confirmation with invalid observation time %s", async observedAt => {
+    const input = { platformId: "douyin" as const, session: fakeSession([]), previousStatus: "online" as const,
+      homepageConfirmation: { kind: "online" as const, observedAt }, now: 600000 };
+    for (const currentUrl of [getPlatform("douyin").routes.site, getPlatform("douyin").routes.home, null]) {
+      expect(await detectLoginState({ ...input, currentUrl })).toMatchObject({ status: "unknown", unconfirmed: true });
+    }
+  });
+
+  it("reports a network failure separately without refreshing the saved homepage conclusion", async () => {
+    const confirmation = Object.freeze({ kind: "online" as const, observedAt: 1000 });
+    const result = await detectLoginState({
+      platformId: "douyin", session: fakeSession([]), currentUrl: getPlatform("douyin").routes.site,
+      lastError: "ERR_CONNECTION_RESET", homepageConfirmation: confirmation, now: 600000,
+      homepage: { kind: "offline", source: "homepage", reason: "旧页面" },
+    });
+    expect(result).toMatchObject({ status: "network_error", source: "homepage" });
+    expect(result.message).toContain("上次主页登录结论保留");
+    expect(confirmation).toEqual({ kind: "online", observedAt: 1000 });
   });
 
   it.each([
@@ -166,6 +224,8 @@ describe("homepage authentication", () => {
     const result = await detectLoginState({
       platformId, currentUrl, session: fakeSession([]), previousStatus: "online", probe,
       homepage: { kind: "online", source: "homepage", reason: "旧主页已登录" },
+      homepageConfirmation: { kind: "online", observedAt: 1000 }, now: 600000,
+      lastError: "ERR_CONNECTION_RESET",
     });
     expect(result.status).toBe("needs_verification");
     expect(probe).not.toHaveBeenCalled();

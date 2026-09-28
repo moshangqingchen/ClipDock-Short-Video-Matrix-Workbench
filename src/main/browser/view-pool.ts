@@ -7,6 +7,8 @@ import { CookieGuard, type CookieDiagnostic } from "./cookie-guard";
 import { IdentityObserver } from "./identity-observer";
 import { DouyinQrObserver, type DouyinQrDiagnostic } from "./douyin-qr-observer";
 import { isHomepageContext } from "./homepage-login";
+import { isHomepageRecheckSource } from "./homepage-recheck";
+import { HomepageCheckHost } from "./homepage-check-host";
 import { WorksRequestObserver } from "./works-request-observer";
 import type { IdentityEvidence } from "./identity-evidence";
 import { closeAccountView } from "@main/network/close-account-view";
@@ -50,6 +52,7 @@ interface LiveView {
   disposeNavigation: () => void;
   disposeNetworkBinding: () => void;
   attached: boolean;
+  checkHostAttached: boolean;
   visible: boolean;
   messageMode: boolean;
   lastUsedAt: number;
@@ -69,6 +72,8 @@ export interface ViewPoolEvents {
 const MIN_BOUNDS: ViewBounds = { x: 0, y: 0, width: 1, height: 1 };
 // Public sites can show their QR dialog without changing the page URL.
 const HOMEPAGE_SWITCH_GRACE_MS = 2 * 60_000;
+const HOMEPAGE_CHECK_TIMEOUT_MS = 12_000;
+const HOMEPAGE_CHECK_BOUNDS: ViewBounds = { x: 0, y: 0, width: 1280, height: 800 };
 
 /**
  * Owns every account WebContentsView. Views are long-lived: switching accounts
@@ -84,6 +89,14 @@ export class ViewPool extends EventEmitter {
   private disposed = false;
   private revision = 0;
   private homepageEvictionTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Temporary canonical views, never an extra renderer in the same account partition. */
+  private readonly homepageCheckEntries = new Map<string, {
+    entry: LiveView; navigationVersion: number; pageVersion: number;
+  }>();
+  private readonly homepageCheckPresentation = new Map<string, {
+    entry: LiveView; bounds: ViewBounds; muted: boolean; attached: boolean;
+  }>();
+  private readonly homepageCheckHost = new HomepageCheckHost();
 
   constructor(private readonly options: ViewPoolOptions) {
     super();
@@ -115,6 +128,7 @@ export class ViewPool extends EventEmitter {
   setMessageMode(accountId: string, enabled: boolean): void {
     const entry = this.live.get(accountId);
     if (!entry || entry.webContents.isDestroyed()) throw new Error("view-not-live");
+    if (enabled) this.abandonHomepageCheck(accountId);
     if (entry.messageMode === enabled) return;
     entry.messageMode = enabled;
     // Invalidate delayed loads before a message navigation is issued. In
@@ -133,6 +147,135 @@ export class ViewPool extends EventEmitter {
 
   getSession(accountId: string): ConfiguredSession | null {
     return this.live.get(accountId)?.session ?? null;
+  }
+
+  /** Eligibility only; callers must declare the exact homepage network scope before rechecking. */
+  canCheckHomepage(accountId: string, platformId: PlatformId): boolean {
+    if (this.disposed || !getPlatform(platformId).routes.site) return false;
+    const entry = this.live.get(accountId);
+    if ([...(this.owned.get(accountId) ?? [])].some((owned) =>
+      owned !== entry && !owned.webContents.isDestroyed())) return false;
+    // Background checks must not cause the ordinary LRU to evict another account's draft.
+    if (!entry) return this.live.size < this.maxLive;
+    return entry.account.platformId === platformId && !entry.crashed && !entry.closePromise &&
+      !entry.visible && !entry.messageMode && !entry.webContents.isDestroyed() &&
+      !entry.webContents.isLoading() && isHomepageRecheckSource(platformId, entry.webContents.getURL());
+  }
+
+  /** One bounded homepage load; it never refreshes a homepage that already exists. */
+  async recheckHomepage(account: ViewPoolAccount): Promise<boolean> {
+    if (!this.canCheckHomepage(account.id, account.platformId)) return false;
+    const url = getPlatform(account.platformId).routes.site!;
+    assertBusinessNetwork(account.id, url);
+    const created = !this.live.has(account.id);
+    const entry = this.ensure(account, { navigate: false });
+    const wc = entry.webContents;
+    const initialUrl = wc.getURL();
+    let navigationVersion = entry.navigationVersion;
+    let pageVersion = entry.pageVersion;
+    let issued = false, cancelled = false, firstNavigation = false;
+    if (created) this.homepageCheckEntries.set(account.id, { entry, navigationVersion, pageVersion });
+    const operation = beginBusinessOperation(account.id, url);
+    const owned = () => !this.disposed && this.live.get(account.id) === entry &&
+      !entry.closePromise && !entry.crashed && !wc.isDestroyed() &&
+      !entry.visible && !entry.messageMode && entry.navigationVersion === navigationVersion &&
+      entry.pageVersion === pageVersion;
+    const onNavigation = (_event: unknown, target: string, inPlace: boolean, mainFrame: boolean) => {
+      if (issued && !firstNavigation && mainFrame && !inPlace && target === url &&
+          entry.navigationVersion === navigationVersion) {
+        firstNavigation = true;
+        pageVersion = entry.pageVersion;
+      }
+    };
+    wc.on("did-start-navigation", onNavigation);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancel!: () => void;
+    const interrupted = new Promise<boolean>((resolve) => {
+      cancel = () => {
+        cancelled = true;
+        // Never stop a user's new navigation, an adopted page, or a QR redirect.
+        if (issued && owned()) wc.stop();
+        resolve(issued);
+      };
+      timer = setTimeout(cancel, HOMEPAGE_CHECK_TIMEOUT_MS);
+    });
+    const onState = (state: ViewState) => {
+      if (state.accountId === account.id && (state.visible || state.messageMode ||
+          this.live.get(account.id) !== entry)) cancel();
+    };
+    this.on("state", onState);
+    operation.signal.addEventListener("abort", cancel, { once: true });
+    try {
+      const navigate = async () => {
+        await entry.session.ready;
+        if (cancelled) return issued;
+        operation.assertCurrent();
+        if (!owned() || wc.getURL() !== initialUrl ||
+            !this.canCheckHomepage(account.id, account.platformId)) return false;
+        const priorPresentation = this.homepageCheckPresentation.get(account.id);
+        this.homepageCheckPresentation.set(account.id, priorPresentation?.entry === entry
+          ? priorPresentation : { entry, bounds: entry.view.getBounds(), muted: wc.isAudioMuted(), attached: entry.attached });
+        // Hidden pooled pages otherwise have a 1×1 viewport. Give the official
+        // header a usable layout and silence video autoplay until observation ends.
+        wc.setAudioMuted(true);
+        if (entry.attached) {
+          this.options.window.contentView.removeChildView(entry.view);
+          entry.attached = false;
+        }
+        entry.view.setBounds(HOMEPAGE_CHECK_BOUNDS);
+        this.homepageCheckHost.attach(entry.view);
+        entry.checkHostAttached = true;
+        entry.navigated = true;
+        navigationVersion = ++entry.navigationVersion;
+        const temporary = this.homepageCheckEntries.get(account.id);
+        if (temporary?.entry === entry) temporary.navigationVersion = navigationVersion;
+        issued = true;
+        try {
+          await wc.loadURL(url);
+        } catch {
+          // Official redirects/abort/errors are inspected by the later DOM check.
+          // No automatic retry: it could generate a second login QR challenge.
+        }
+        if (!cancelled) operation.assertCurrent();
+        return issued;
+      };
+      if (operation.signal.aborted) cancel();
+      return await Promise.race([navigate(), interrupted]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      operation.signal.removeEventListener("abort", cancel);
+      this.removeListener("state", onState);
+      wc.removeListener("did-start-navigation", onNavigation);
+      operation.release();
+    }
+  }
+
+  /** Release only a never-shown view created by recheckHomepage, after its DOM observation. */
+  async finishHomepageCheck(accountId: string): Promise<void> {
+    const temporary = this.homepageCheckEntries.get(accountId);
+    this.homepageCheckEntries.delete(accountId);
+    if (temporary) {
+      const { entry, navigationVersion, pageVersion } = temporary;
+      if (this.live.get(accountId) === entry && !entry.visible && !entry.messageMode &&
+          entry.navigationVersion === navigationVersion && entry.pageVersion === pageVersion) {
+        // Do not briefly unmute an autoplaying temporary page before asynchronous destruction.
+        this.homepageCheckPresentation.delete(accountId);
+        this.live.delete(accountId);
+        this.emitRemoved(entry, "destroyed");
+        await this.beginClose(entry);
+        return;
+      }
+    }
+    const presentation = this.homepageCheckPresentation.get(accountId);
+    if (presentation && this.live.get(accountId) === presentation.entry &&
+        !presentation.entry.visible && !presentation.entry.messageMode &&
+        !presentation.entry.webContents.isDestroyed()) {
+      // The original management page is now a video homepage. Restore its hidden
+      // viewport, but preserve the original audio preference until a real takeover.
+      this.restoreHomepageCheckPresentation(presentation, false);
+      return;
+    }
+    this.abandonHomepageCheck(accountId);
   }
 
   getIdentityEvidence(accountId: string): IdentityEvidence | null {
@@ -182,6 +325,7 @@ export class ViewPool extends EventEmitter {
   }
 
   async show(account: ViewPoolAccount, bounds: ViewBounds, enterHomepage = false): Promise<ViewState> {
+    this.abandonHomepageCheck(account.id);
     assertBusinessNetwork(account.id);
     const previous = this.live.get(account.id);
     if (previous?.crashed) {
@@ -232,6 +376,12 @@ export class ViewPool extends EventEmitter {
   setBounds(accountId: string, bounds: ViewBounds): void {
     const entry = this.live.get(accountId);
     if (!entry) return;
+    if (entry.checkHostAttached) {
+      entry.bounds = clampBounds(bounds, this.options.window);
+      return;
+    }
+    // A queued ResizeObserver update can arrive before show() claims the page.
+    if (entry.visible) this.abandonHomepageCheck(accountId);
     this.applyBounds(entry, bounds);
   }
 
@@ -240,11 +390,13 @@ export class ViewPool extends EventEmitter {
     const entry = this.live.get(accountId);
     if (!entry) throw new Error("view-not-live");
     if (options.background && entry.messageMode) return;
+    this.abandonHomepageCheck(accountId);
     entry.navigated = true;
     await this.load(entry, url, false, options.background);
   }
 
   reload(accountId: string): void {
+    this.abandonHomepageCheck(accountId);
     const entry = this.live.get(accountId);
     if (entry?.crashed) {
       const { account, bounds, visible } = entry;
@@ -273,12 +425,14 @@ export class ViewPool extends EventEmitter {
   }
 
   back(accountId: string): void {
+    this.abandonHomepageCheck(accountId);
     assertBusinessNetwork(accountId);
     const wc = this.getWebContents(accountId);
     if (wc?.navigationHistory.canGoBack()) wc.navigationHistory.goBack();
   }
 
   forward(accountId: string): void {
+    this.abandonHomepageCheck(accountId);
     assertBusinessNetwork(accountId);
     const wc = this.getWebContents(accountId);
     if (wc?.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
@@ -336,8 +490,11 @@ export class ViewPool extends EventEmitter {
   dispose(): void {
     this.disposed = true;
     if (this.homepageEvictionTimer) clearTimeout(this.homepageEvictionTimer);
-    for (const entries of this.owned.values()) for (const entry of entries) this.beginClose(entry);
+    const closing = [...this.owned.values()].flatMap((entries) => [...entries].map((entry) => this.beginClose(entry)));
     this.live.clear();
+    // beginClose detaches every child first. Retain native ownership until the
+    // close results settle, then destroy the now-empty hidden layout host.
+    void Promise.allSettled(closing).then(() => this.homepageCheckHost.dispose());
   }
 
   /* ------------------------------------------------------------------ */
@@ -377,6 +534,7 @@ export class ViewPool extends EventEmitter {
       disposeNavigation: () => undefined,
       disposeNetworkBinding: () => undefined,
       attached: false,
+      checkHostAttached: false,
       visible: false,
       messageMode: false,
       lastUsedAt: Date.now(),
@@ -396,7 +554,7 @@ export class ViewPool extends EventEmitter {
       view.setVisible(false);
       entry.disposeNetworkBinding = bindAccountWebContents(webContents, account.id);
       entry.identityObserver = new IdentityObserver(webContents, account.id, account.platformId, () =>
-        this.options.onActivity?.(account.id, "identity"),
+        this.reportActivity(entry, "identity"),
       );
       if (account.platformId === "weixin_channels") entry.worksObserver = new WorksRequestObserver(webContents, account.id);
       if (account.platformId === "douyin") entry.qrObserver = new DouyinQrObserver(webContents, account.id,
@@ -405,7 +563,7 @@ export class ViewPool extends EventEmitter {
         allowNetwork: () => canUseBusinessNetwork(account.id),
       });
       entry.cookieGuard = new CookieGuard(session.session, account.platformId, {
-        onSessionCookiesChanged: () => this.options.onActivity?.(account.id, "cookies"),
+        onSessionCookiesChanged: () => this.reportActivity(entry, "cookies"),
         onDiagnostic: (diagnostic) => this.options.onCookieDiagnostic?.(account.id, diagnostic),
       });
       void entry.cookieGuard.persistExisting();
@@ -421,22 +579,27 @@ export class ViewPool extends EventEmitter {
     const wc = entry.webContents;
     const emit = () => this.emitState(entry);
     wc.on("did-start-navigation", (_event, _url, _inPlace, mainFrame) => {
-      if (mainFrame) entry.pageVersion++;
+      if (mainFrame) {
+        entry.pageVersion++;
+        const temporary = this.homepageCheckEntries.get(entry.account.id);
+        if (temporary?.entry === entry && temporary.navigationVersion === entry.navigationVersion)
+          temporary.pageVersion = entry.pageVersion;
+      }
     });
     wc.on("did-start-loading", emit);
     wc.on("did-stop-loading", () => {
       emit();
-      this.options.onActivity?.(entry.account.id, "loaded");
+      this.reportActivity(entry, "loaded");
     });
     wc.on("did-navigate", () => {
       entry.lastError = null;
       emit();
-      this.options.onActivity?.(entry.account.id, "navigated");
+      this.reportActivity(entry, "navigated");
     });
     wc.on("did-navigate-in-page", (_e, _url, isMainFrame) => {
       if (isMainFrame) {
         emit();
-        this.options.onActivity?.(entry.account.id, "navigated");
+        this.reportActivity(entry, "navigated");
       }
     });
     wc.on("page-title-updated", emit);
@@ -461,6 +624,7 @@ export class ViewPool extends EventEmitter {
   }
 
   private async load(entry: LiveView, url: string, retry = false, background = false): Promise<void> {
+    this.abandonHomepageCheck(entry.account.id);
     const wc = entry.webContents;
     if (wc.isDestroyed()) return;
     const navigationVersion = ++entry.navigationVersion;
@@ -577,6 +741,10 @@ export class ViewPool extends EventEmitter {
   }
 
   private detach(entry: LiveView): void {
+    if (entry.checkHostAttached) {
+      this.homepageCheckHost.detach(entry.view);
+      entry.checkHostAttached = false;
+    }
     try {
       if (entry.attached) this.options.window.contentView.removeChildView(entry.view);
     } catch {
@@ -587,6 +755,11 @@ export class ViewPool extends EventEmitter {
   }
 
   private beginClose(entry: LiveView): Promise<void> {
+    // A closing renderer must stay muted, including revocation and application shutdown.
+    if (this.homepageCheckEntries.get(entry.account.id)?.entry === entry)
+      this.homepageCheckEntries.delete(entry.account.id);
+    if (this.homepageCheckPresentation.get(entry.account.id)?.entry === entry)
+      this.homepageCheckPresentation.delete(entry.account.id);
     if (entry.closePromise) return entry.closePromise;
     entry.identityObserver?.dispose();
     entry.worksObserver?.dispose();
@@ -617,6 +790,14 @@ export class ViewPool extends EventEmitter {
   }
 
   private releaseDestroyed(entry: LiveView): void {
+    if (entry.checkHostAttached) {
+      this.homepageCheckHost.detach(entry.view);
+      entry.checkHostAttached = false;
+    }
+    if (this.homepageCheckEntries.get(entry.account.id)?.entry === entry)
+      this.homepageCheckEntries.delete(entry.account.id);
+    if (this.homepageCheckPresentation.get(entry.account.id)?.entry === entry)
+      this.homepageCheckPresentation.delete(entry.account.id);
     if (!entry.webContents.isDestroyed()) return;
     this.detach(entry);
     if (!entry.resourcesReleased) {
@@ -644,6 +825,37 @@ export class ViewPool extends EventEmitter {
     const owned = this.owned.get(entry.account.id);
     owned?.delete(entry);
     if (owned?.size === 0) this.owned.delete(entry.account.id);
+  }
+
+  private abandonHomepageCheck(accountId: string): void {
+    this.homepageCheckEntries.delete(accountId);
+    const presentation = this.homepageCheckPresentation.get(accountId);
+    this.homepageCheckPresentation.delete(accountId);
+    if (!presentation || this.live.get(accountId) !== presentation.entry ||
+        presentation.entry.webContents.isDestroyed()) return;
+    this.restoreHomepageCheckPresentation(presentation, true);
+  }
+
+  private restoreHomepageCheckPresentation(presentation: {
+    entry: LiveView; bounds: ViewBounds; muted: boolean; attached: boolean;
+  }, restoreAudio: boolean): void {
+    const { entry } = presentation;
+    if (entry.checkHostAttached) {
+      this.homepageCheckHost.detach(entry.view);
+      entry.checkHostAttached = false;
+      if (presentation.attached) {
+        this.options.window.contentView.addChildView(entry.view);
+        entry.attached = true;
+      }
+      entry.view.setVisible(entry.visible);
+    }
+    entry.view.setBounds(presentation.bounds);
+    if (restoreAudio) entry.webContents.setAudioMuted(presentation.muted);
+  }
+
+  private reportActivity(entry: LiveView, reason: "navigated" | "cookies" | "loaded" | "identity"): void {
+    if (this.live.get(entry.account.id) === entry && !entry.closePromise &&
+        !entry.webContents.isDestroyed()) this.options.onActivity?.(entry.account.id, reason);
   }
 
   private toState(entry: LiveView): ViewState {

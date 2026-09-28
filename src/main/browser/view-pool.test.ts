@@ -9,6 +9,8 @@ const fixtures = vi.hoisted(() => ({
   guards: [] as any[],
   sessions: [] as any[],
   qrObservers: [] as any[],
+  views: [] as any[],
+  hosts: [] as any[],
   failGuard: false,
 }));
 vi.mock("electron", async () => {
@@ -16,6 +18,10 @@ vi.mock("electron", async () => {
   class Contents extends EventEmitter {
     destroyed = false;
     url = "";
+    loading = false;
+    muted = false;
+    isAudioMuted = () => this.muted;
+    setAudioMuted = vi.fn((muted: boolean) => { this.muted = muted; });
     stop = vi.fn();
     setWebRTCIPHandlingPolicy = vi.fn();
     close = vi.fn();
@@ -23,7 +29,7 @@ vi.mock("electron", async () => {
     isDestroyed = () => this.destroyed;
     getURL = () => this.url;
     getTitle = () => "test page";
-    isLoading = () => false;
+    isLoading = () => this.loading;
     navigationHistory = { canGoBack: () => false, canGoForward: () => false };
     loadURL = vi.fn(async (url: string) => {
       this.url = url;
@@ -34,17 +40,27 @@ vi.mock("electron", async () => {
     }
   }
   return {
+    BaseWindow: class {
+      destroyed = false;
+      contentView = { addChildView: vi.fn(), removeChildView: vi.fn() };
+      isDestroyed = () => this.destroyed;
+      destroy = vi.fn(() => { this.destroyed = true; });
+      constructor(readonly options: unknown) { fixtures.hosts.push(this); }
+    },
     WebContentsView: class {
       private readonly contents = new Contents();
+      private bounds = { x: 0, y: 0, width: 0, height: 0 };
       // Electron's view no longer exposes its WebContents inside the destroyed callback.
       get webContents() {
         return this.contents.destroyed ? undefined : this.contents;
       }
       setBackgroundColor = vi.fn();
       setVisible = vi.fn();
-      setBounds = vi.fn();
+      getBounds = () => ({ ...this.bounds });
+      setBounds = vi.fn((bounds: typeof this.bounds) => { this.bounds = { ...bounds }; });
       constructor() {
         fixtures.contents.push(this.contents);
+        fixtures.views.push(this);
       }
     },
   };
@@ -66,7 +82,7 @@ vi.mock("./cookie-guard", () => ({
     flush = vi.fn(async () => undefined);
     persistExisting = vi.fn(async () => undefined);
     dispose = vi.fn();
-    constructor() {
+    constructor(_session: unknown, _platformId: unknown, readonly options: { onSessionCookiesChanged?: () => void }) {
       if (fixtures.failGuard) throw new Error("native initialization failure");
       fixtures.guards.push(this);
     }
@@ -104,6 +120,8 @@ describe("ViewPool ownership through actual destruction", () => {
     fixtures.guards.length = 0;
     fixtures.sessions.length = 0;
     fixtures.qrObservers.length = 0;
+    fixtures.views.length = 0;
+    fixtures.hosts.length = 0;
     fixtures.failGuard = false;
     restoreController = installBusinessNetwork({
       enforcement: "observe",
@@ -119,17 +137,415 @@ describe("ViewPool ownership through actual destruction", () => {
   });
   const account = (id: string) => ({ id, platformId: "bilibili" as const });
   function fixture() {
+    const window = { contentView: { addChildView: vi.fn(), removeChildView: vi.fn() } };
     const pool = new ViewPool({
       maxLive: 2,
-      window: { contentView: { addChildView: vi.fn(), removeChildView: vi.fn() } } as never,
+      window: window as never,
     });
     pools.push(pool);
     const create = (id: string) => {
       pool.ensure(account(id), { navigate: false });
       return fixtures.contents.at(-1) as FixtureContents;
     };
-    return { pool, create };
+    return { pool, create, window };
   }
+
+  it("checks a never-opened account on its public homepage and releases only its temporary view", async () => {
+    const f = fixture();
+    expect(f.pool.canCheckHomepage("one", "bilibili")).toBe(true);
+    const check = f.pool.recheckHomepage(account("one"));
+    const wc = fixtures.contents[0];
+    wc.loadURL.mockImplementationOnce(async (url: string) => {
+      wc.url = url;
+      wc.emit("did-start-navigation", {}, url, false, true);
+    });
+    expect(await check).toBe(true);
+    expect(wc.loadURL).toHaveBeenCalledExactlyOnceWith(getPlatform("bilibili").routes.site);
+    expect(f.pool.getState("one")).toMatchObject({ visible: false, attached: false });
+    expect(fixtures.sessions[0].partition).toBe("persist:test-one");
+    wc.close.mockImplementation(() => wc.destroy());
+    await f.pool.finishHomepageCheck("one");
+    expect(f.pool.has("one")).toBe(false);
+    expect(wc.close).toHaveBeenCalledOnce();
+  });
+
+  it("lazily hosts automatic pages in one never-shown native window without extra contents", async () => {
+    const f = fixture();
+    f.create("one");
+    expect(fixtures.hosts).toHaveLength(0);
+    await f.pool.recheckHomepage(account("one"));
+    await f.pool.recheckHomepage(account("two"));
+    expect(fixtures.hosts).toHaveLength(1);
+    expect(fixtures.hosts[0].options).toMatchObject({ show: false, focusable: false, skipTaskbar: true });
+    expect(fixtures.contents).toHaveLength(2);
+    expect(fixtures.hosts[0].contentView.addChildView).toHaveBeenCalledTimes(2);
+    expect(f.window.contentView.addChildView).not.toHaveBeenCalled();
+    expect(fixtures.views[0].setVisible).toHaveBeenLastCalledWith(true);
+    expect(f.pool.getState("one")).toMatchObject({ visible: false, attached: false });
+  });
+
+  it("moves an existing hidden view back to its original parent without unmuting on completion", async () => {
+    const f = fixture();
+    f.create("one");
+    const wc = fixtures.contents[0], view = fixtures.views[0];
+    await f.pool.navigate("one", getPlatform("bilibili").routes.home);
+    await f.pool.show(account("one"), { x: 0, y: 0, width: 640, height: 480 }, true);
+    f.pool.hide("one");
+    await f.pool.recheckHomepage(account("one"));
+    const host = fixtures.hosts[0];
+    expect(f.window.contentView.removeChildView).toHaveBeenCalledExactlyOnceWith(view);
+    expect(host.contentView.addChildView).toHaveBeenCalledExactlyOnceWith(view);
+    expect(f.pool.getState("one")).toMatchObject({ visible: false, attached: false });
+    f.pool.setBounds("one", { x: 0, y: 0, width: 1, height: 1 });
+    expect(view.getBounds()).toMatchObject({ width: 1280, height: 800 });
+    await f.pool.finishHomepageCheck("one");
+    expect(host.contentView.removeChildView).toHaveBeenCalledExactlyOnceWith(view);
+    expect(f.window.contentView.addChildView).toHaveBeenCalledTimes(2);
+    expect(view.setVisible).toHaveBeenLastCalledWith(false);
+    expect(f.pool.getState("one")).toMatchObject({ visible: false, attached: true });
+    expect(wc.muted).toBe(true);
+  });
+
+  it("moves an adopted automatic page into the user window exactly once", async () => {
+    const f = fixture();
+    await f.pool.recheckHomepage(account("one"));
+    const view = fixtures.views[0], host = fixtures.hosts[0];
+    const bounds = { x: 20, y: 30, width: 640, height: 480 };
+    await f.pool.show(account("one"), bounds, true);
+    await f.pool.finishHomepageCheck("one");
+    expect(host.contentView.removeChildView).toHaveBeenCalledExactlyOnceWith(view);
+    expect(f.window.contentView.addChildView).toHaveBeenCalledExactlyOnceWith(view);
+    expect(view.getBounds()).toEqual(bounds);
+    expect(f.pool.getState("one")).toMatchObject({ visible: true, attached: true });
+    expect(fixtures.contents[0].muted).toBe(false);
+  });
+
+  it("destroys the empty check host only after native account closures settle", async () => {
+    const f = fixture();
+    await f.pool.recheckHomepage(account("one"));
+    const wc = fixtures.contents[0], host = fixtures.hosts[0], view = fixtures.views[0];
+    f.pool.dispose();
+    expect(host.contentView.removeChildView).toHaveBeenCalledExactlyOnceWith(view);
+    expect(wc.close).toHaveBeenCalledOnce();
+    expect(host.destroy).not.toHaveBeenCalled();
+    wc.destroy();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("ignores navigation/loading/cookie tail events from closing or replaced entries", () => {
+    const onActivity = vi.fn();
+    const pool = new ViewPool({ maxLive: 2, onActivity,
+      window: { contentView: { addChildView: vi.fn(), removeChildView: vi.fn() } } as never });
+    pools.push(pool);
+    pool.ensure(account("one"), { navigate: false });
+    const old = fixtures.contents[0], guard = fixtures.guards[0];
+    old.emit("did-stop-loading");
+    old.emit("did-navigate");
+    old.emit("did-navigate-in-page", {}, "https://www.bilibili.com/", true);
+    guard.options.onSessionCookiesChanged();
+    expect(onActivity).toHaveBeenCalledTimes(4);
+    onActivity.mockClear();
+    pool.remove("one");
+    old.emit("did-stop-loading");
+    old.emit("did-navigate");
+    guard.options.onSessionCookiesChanged();
+    old.destroy();
+    pool.ensure(account("one"), { navigate: false });
+    old.emit("did-navigate-in-page", {}, "https://www.bilibili.com/", true);
+    guard.options.onSessionCookiesChanged();
+    expect(onActivity).not.toHaveBeenCalled();
+    fixtures.contents[1].emit("did-stop-loading");
+    expect(onActivity).toHaveBeenCalledExactlyOnceWith("one", "loaded");
+  });
+
+  it.each([false, true])("keeps a retained homepage silent until adoption restores original muted=%s", async (muted) => {
+    const f = fixture();
+    f.create("one");
+    const wc = fixtures.contents[0], view = fixtures.views[0];
+    await f.pool.navigate("one", getPlatform("bilibili").routes.home);
+    await f.pool.show(account("one"), { x: 30, y: 40, width: 600, height: 400 }, true);
+    f.pool.hide("one");
+    wc.muted = muted;
+    expect(view.getBounds()).toEqual({ x: 0, y: 0, width: 1, height: 1 });
+    expect(await f.pool.recheckHomepage(account("one"))).toBe(true);
+    expect(view.getBounds()).toEqual({ x: 0, y: 0, width: 1280, height: 800 });
+    expect(wc.muted).toBe(true);
+    await f.pool.finishHomepageCheck("one");
+    expect(view.getBounds()).toEqual({ x: 0, y: 0, width: 1, height: 1 });
+    expect(wc.muted).toBe(true);
+    await f.pool.finishHomepageCheck("one");
+    expect(wc.muted).toBe(true);
+    expect(wc.close).not.toHaveBeenCalled();
+    await f.pool.show(account("one"), { x: 30, y: 40, width: 600, height: 400 }, true);
+    expect(wc.muted).toBe(muted);
+  });
+
+  it("keeps an automatic temporary page muted until Chromium confirms destruction", async () => {
+    const f = fixture();
+    await f.pool.recheckHomepage(account("one"));
+    const wc = fixtures.contents[0];
+    const closed = f.pool.finishHomepageCheck("one");
+    expect(wc.close).toHaveBeenCalledOnce();
+    expect(wc.destroyed).toBe(false);
+    expect(wc.muted).toBe(true);
+    expect(wc.setAudioMuted).not.toHaveBeenCalledWith(false);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(wc.muted).toBe(true);
+    wc.destroy();
+    await closed;
+  });
+
+  it("does not treat a hidden resize as audio takeover before the page is shown", async () => {
+    const f = fixture();
+    f.create("one");
+    const wc = fixtures.contents[0];
+    await f.pool.navigate("one", getPlatform("bilibili").routes.home);
+    await f.pool.recheckHomepage(account("one"));
+    await f.pool.finishHomepageCheck("one");
+    const bounds = { x: 10, y: 20, width: 500, height: 400 };
+    f.pool.setBounds("one", bounds);
+    expect(wc.muted).toBe(true);
+    await f.pool.show(account("one"), bounds, true);
+    expect(wc.muted).toBe(false);
+  });
+
+  it.each(["navigation", "reload"])("restores retained homepage audio only when %s takes over", async (takeover) => {
+    const f = fixture();
+    f.create("one");
+    const wc = fixtures.contents[0];
+    await f.pool.navigate("one", getPlatform("bilibili").routes.home);
+    await f.pool.recheckHomepage(account("one"));
+    await f.pool.finishHomepageCheck("one");
+    expect(wc.muted).toBe(true);
+    if (takeover === "navigation") await f.pool.navigate("one", getPlatform("bilibili").routes.works, { background: true });
+    else {
+      wc.reload = vi.fn();
+      f.pool.reload("one");
+    }
+    expect(wc.muted).toBe(false);
+  });
+
+  it.each(["revocation", "dispose"])("does not restore retained homepage audio during %s", async (closing) => {
+    const f = fixture();
+    f.create("one");
+    const wc = fixtures.contents[0];
+    await f.pool.navigate("one", getPlatform("bilibili").routes.home);
+    await f.pool.recheckHomepage(account("one"));
+    await f.pool.finishHomepageCheck("one");
+    let closed: Promise<void> | undefined;
+    if (closing === "revocation") closed = f.pool.suspendNetworkAccount("one");
+    else f.pool.dispose();
+    expect(wc.close).toHaveBeenCalledOnce();
+    expect(wc.muted).toBe(true);
+    expect(wc.setAudioMuted).not.toHaveBeenCalledWith(false);
+    wc.destroy();
+    await closed;
+  });
+
+  it("restores audio on adoption without overwriting the user's new foreground bounds on finish", async () => {
+    const f = fixture();
+    expect(await f.pool.recheckHomepage(account("one"))).toBe(true);
+    const wc = fixtures.contents[0], view = fixtures.views[0];
+    expect(wc.muted).toBe(true);
+    const bounds = { x: 10, y: 20, width: 500, height: 400 };
+    await f.pool.show(account("one"), bounds, true);
+    expect(wc.muted).toBe(false);
+    await f.pool.finishHomepageCheck("one");
+    expect(view.getBounds()).toEqual(bounds);
+    expect(wc.muted).toBe(false);
+    expect(wc.close).not.toHaveBeenCalled();
+  });
+
+  it("reuses a hidden read-only management page but never releases that existing view", async () => {
+    const f = fixture();
+    const wc = f.create("one");
+    await f.pool.navigate("one", getPlatform("bilibili").routes.works);
+    expect(await f.pool.recheckHomepage(account("one"))).toBe(true);
+    await f.pool.finishHomepageCheck("one");
+    expect(wc.close).not.toHaveBeenCalled();
+    expect(f.pool.getWebContents("one")).toBe(wc);
+    expect(wc.loadURL).toHaveBeenLastCalledWith(getPlatform("bilibili").routes.site);
+  });
+
+  it.each([
+    "https://www.bilibili.com/",
+    "https://passport.bilibili.com/login",
+    "https://member.bilibili.com/platform/upload/video/frame",
+    "https://member.bilibili.com/platform/home?edit=1",
+    "https://member.bilibili.com/platform/home#/edit",
+    "https://message.bilibili.com/#/whisper",
+  ])("does not replace or reload protected page %s", async (url) => {
+    const f = fixture();
+    const wc = f.create("one");
+    await f.pool.navigate("one", url);
+    expect(f.pool.canCheckHomepage("one", "bilibili")).toBe(false);
+    expect(await f.pool.recheckHomepage(account("one"))).toBe(false);
+    expect(wc.loadURL).toHaveBeenCalledExactlyOnceWith(url);
+  });
+
+  it.each(["visible", "loading", "message", "crashed"])("does not take over a %s management page", async (state) => {
+    const f = fixture();
+    const wc = f.create("one");
+    await f.pool.navigate("one", getPlatform("bilibili").routes.home);
+    if (state === "visible") await f.pool.show(account("one"), { x: 0, y: 0, width: 640, height: 480 }, true);
+    if (state === "loading") fixtures.contents[0].loading = true;
+    if (state === "message") f.pool.setMessageMode("one", true);
+    if (state === "crashed") wc.emit("render-process-gone", {}, { reason: "crashed" });
+    expect(f.pool.canCheckHomepage("one", "bilibili")).toBe(false);
+    expect(await f.pool.recheckHomepage(account("one"))).toBe(false);
+    expect(wc.loadURL).toHaveBeenCalledOnce();
+  });
+
+  it("never invokes LRU eviction to create an automatic check view at capacity", async () => {
+    const f = fixture();
+    const draft = f.create("draft");
+    await f.pool.navigate("draft", getPlatform("bilibili").routes.upload);
+    f.create("second");
+    expect(f.pool.canCheckHomepage("third", "bilibili")).toBe(false);
+    expect(await f.pool.recheckHomepage(account("third"))).toBe(false);
+    expect(fixtures.contents).toHaveLength(2);
+    expect(draft.close).not.toHaveBeenCalled();
+  });
+
+  it.each(["foreground", "message", "editor-url", "same-url-navigation", "other-load"])(
+    "rechecks ownership after session initialization when %s wins",
+    async (change) => {
+      const f = fixture();
+      const wc = f.create("one");
+      await f.pool.navigate("one", getPlatform("bilibili").routes.home);
+      let ready!: () => void;
+      fixtures.sessions[0].ready = new Promise<void>((resolve) => { ready = resolve; });
+      const check = f.pool.recheckHomepage(account("one"));
+      let otherLoad: Promise<void> | undefined;
+      if (change === "foreground") {
+        await f.pool.show(account("one"), { x: 0, y: 0, width: 640, height: 480 }, true);
+        f.pool.hide("one"); // A briefly adopted page still belongs to the user.
+      }
+      if (change === "message") f.pool.setMessageMode("one", true);
+      if (change === "editor-url") fixtures.contents[0].url += "?edit=1";
+      if (change === "same-url-navigation") wc.emit("did-start-navigation", {}, getPlatform("bilibili").routes.home, false, true);
+      if (change === "other-load") otherLoad = f.pool.navigate("one", getPlatform("bilibili").routes.works, { background: true });
+      ready();
+      expect(await check).toBe(false);
+      await otherLoad;
+      expect(wc.loadURL).not.toHaveBeenCalledWith(getPlatform("bilibili").routes.site);
+    },
+  );
+
+  it("bounds session initialization and never issues a late homepage load after timeout", async () => {
+    const f = fixture();
+    const wc = f.create("one");
+    let ready!: () => void;
+    fixtures.sessions[0].ready = new Promise<void>((resolve) => { ready = resolve; });
+    const check = f.pool.recheckHomepage(account("one"));
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(await check).toBe(false);
+    ready();
+    await Promise.resolve();
+    expect(wc.loadURL).not.toHaveBeenCalled();
+    expect(wc.stop).not.toHaveBeenCalled();
+  });
+
+  it("stops only its own stalled homepage navigation when the deadline expires", async () => {
+    const f = fixture();
+    const wc = f.create("one");
+    wc.loadURL.mockImplementationOnce((url: string) => {
+      wc.emit("did-start-navigation", {}, url, false, true);
+      return new Promise<void>(() => undefined);
+    });
+    const check = f.pool.recheckHomepage(account("one"));
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(await check).toBe(true);
+    expect(wc.stop).toHaveBeenCalledOnce();
+  });
+
+  it("does not stop a later explicit navigation when an old homepage load times out", async () => {
+    const f = fixture();
+    const wc = f.create("one");
+    wc.loadURL.mockImplementationOnce(() => new Promise<void>(() => undefined));
+    const check = f.pool.recheckHomepage(account("one"));
+    await Promise.resolve();
+    await f.pool.navigate("one", getPlatform("bilibili").routes.upload);
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(await check).toBe(true);
+    expect(wc.stop).not.toHaveBeenCalled();
+    expect(f.pool.getState("one")?.url).toBe(getPlatform("bilibili").routes.upload);
+  });
+
+  it("does not stop a newer page generation or QR redirect on homepage timeout", async () => {
+    const f = fixture();
+    const wc = f.create("one");
+    wc.loadURL.mockImplementationOnce((url: string) => {
+      wc.emit("did-start-navigation", {}, url, false, true);
+      wc.emit("did-start-navigation", {}, "https://passport.bilibili.com/login", false, true);
+      return new Promise<void>(() => undefined);
+    });
+    const check = f.pool.recheckHomepage(account("one"));
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(await check).toBe(true);
+    expect(wc.stop).not.toHaveBeenCalled();
+  });
+
+  it("does not retry failed automatic homepage loads", async () => {
+    const f = fixture();
+    const wc = f.create("one");
+    wc.loadURL.mockRejectedValueOnce(Object.assign(new Error("network failure"), { errno: -105 }));
+    expect(await f.pool.recheckHomepage(account("one"))).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(wc.loadURL).toHaveBeenCalledOnce();
+  });
+
+  it.each(["show", "navigation", "messages", "reload"])("does not release an automatic view after %s adoption", async (takeover) => {
+    const f = fixture();
+    expect(await f.pool.recheckHomepage(account("one"))).toBe(true);
+    const wc = fixtures.contents[0];
+    if (takeover === "show") {
+      await f.pool.show(account("one"), { x: 0, y: 0, width: 640, height: 480 }, true);
+      f.pool.hide("one");
+    }
+    if (takeover === "navigation") await f.pool.navigate("one", getPlatform("bilibili").routes.works, { background: true });
+    if (takeover === "messages") f.pool.setMessageMode("one", true);
+    if (takeover === "reload") {
+      wc.reload = vi.fn();
+      f.pool.reload("one");
+    }
+    await f.pool.finishHomepageCheck("one");
+    expect(f.pool.getWebContents("one")).toBe(wc);
+    expect(wc.close).not.toHaveBeenCalled();
+  });
+
+  it("cleans up its never-adopted automatic view after an official login redirect", async () => {
+    const f = fixture();
+    await f.pool.recheckHomepage(account("one"));
+    const wc = fixtures.contents[0];
+    wc.url = "https://passport.bilibili.com/login";
+    wc.emit("did-start-navigation", {}, wc.url, false, true);
+    wc.close.mockImplementation(() => wc.destroy());
+    await f.pool.finishHomepageCheck("one");
+    expect(wc.close).toHaveBeenCalledOnce();
+    expect(f.pool.has("one")).toBe(false);
+  });
+
+  it("cancels a pending automatic check on network revocation without issuing a later request", async () => {
+    const f = fixture();
+    const wc = f.create("one");
+    const abort = new AbortController();
+    const release = vi.fn();
+    const restore = installBusinessNetwork({ enforcement: "strict", check: () => ({ allowed: true, reason: "READY" }),
+      acquire: () => ({ signal: abort.signal, isCurrent: () => !abort.signal.aborted, release }) });
+    let ready!: () => void;
+    fixtures.sessions[0].ready = new Promise<void>((resolve) => { ready = resolve; });
+    try {
+      const check = f.pool.recheckHomepage(account("one"));
+      abort.abort();
+      expect(await check).toBe(false);
+      ready();
+      await Promise.resolve();
+      expect(wc.loadURL).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledOnce();
+    } finally { restore(); }
+  });
 
   it("only attaches QR diagnostics to Douyin, without turning observations into account activity", async () => {
     const onActivity = vi.fn(), onQrDiagnostic = vi.fn();

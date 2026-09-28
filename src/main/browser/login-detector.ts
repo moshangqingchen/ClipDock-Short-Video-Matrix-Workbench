@@ -7,12 +7,12 @@ import {
   isVerificationUrl,
   type PlatformId,
 } from "@shared/platforms";
-import type { AccountStatus } from "@shared/types";
+import type { AccountStatus, HomepageConfirmation } from "@shared/types";
 import { gatedSessionFetch } from "@main/network/gated-session-fetch";
 import { gatedSessionProbe } from "@main/network/gated-session-probe";
 import { isNetworkDormantError } from "@main/network/business-access";
 import { parseIdentityResponse, type IdentityEvidence } from "./identity-evidence";
-import { HOMEPAGE_CONFIRMATION_TTL_MS, requiresHomepageLogin, isHomepageContext, type HomepageLoginVerdict } from "./homepage-login";
+import { requiresHomepageLogin, isHomepageContext, type HomepageLoginVerdict } from "./homepage-login";
 
 export interface ProbeResponse {
   status: number;
@@ -46,8 +46,8 @@ export interface DetectionInput {
   evidence?: IdentityEvidence | null;
   /** Read-only evidence from the currently loaded consumer homepage. */
   homepage?: HomepageLoginVerdict | null;
-  /** Main-process memory only; never restored from stored account status or creator identity. */
-  homepageConfirmation?: { kind: "online" | "offline"; observedAt: number } | null;
+  /** Last explicit homepage observation; never inferred from account status or creator identity. */
+  homepageConfirmation?: HomepageConfirmation | null;
 }
 
 export interface DetectionResult {
@@ -229,22 +229,29 @@ export async function detectLoginState(input: DetectionInput): Promise<Detection
   if (url && isVerificationUrl(input.platformId, url))
     return { ...base, status: "needs_verification", message: "平台要求完成安全验证" };
   if (input.lastError)
-    return { ...base, status: "network_error", message: "账号页面加载失败，等待主页重新确认登录" };
+    return { ...base, status: "network_error", message: "账号页面加载失败，等待网络恢复后复核；上次主页登录结论保留" };
+  const confirmation = input.homepageConfirmation;
+  const now = input.now ?? Date.now();
+  const confirmedStatus = confirmation &&
+    (confirmation.kind === "online" || confirmation.kind === "offline") &&
+    Number.isFinite(confirmation.observedAt) && confirmation.observedAt > 0 &&
+    confirmation.observedAt <= now
+    ? confirmation.kind : null;
   if (isHomepageContext(input.platformId, url)) {
     const homepage = input.loading ? null : input.homepage;
     if (homepage?.source === "homepage" && (homepage.kind === "online" || homepage.kind === "offline"))
       return { ...base, status: homepage.kind, message: homepage.reason,
         ...(homepage.kind === "online" && typeof homepage.avatarUrl === "string" ? { avatarUrl: homepage.avatarUrl } : {}) };
-    return { ...base, status: input.previousStatus === "offline" ? "offline" : "unknown", unconfirmed: true,
-      message: homepage?.reason || "等待主页加载并确认登录状态" };
+    return { ...base, status: confirmedStatus ?? (input.previousStatus === "offline" ? "offline" : "unknown"), unconfirmed: true,
+      message: confirmedStatus
+        ? `${homepage?.reason || "等待主页加载并确认登录状态"}；上次主页登录结论保留`
+        : homepage?.reason || "等待主页加载并确认登录状态" };
   }
-  const confirmation = input.homepageConfirmation;
-  const age = (input.now ?? Date.now()) - (confirmation?.observedAt ?? -Infinity);
-  if (confirmation && age >= 0 && age < HOMEPAGE_CONFIRMATION_TTL_MS)
-    return { ...base, status: confirmation.kind, unconfirmed: true,
-      message: "沿用本次会话最近的主页登录结论；管理后台不用于确认主页登录" };
+  if (confirmedStatus)
+    return { ...base, status: confirmedStatus, unconfirmed: true,
+      message: "保留上次主页登录结论，等待主页自动复核；管理后台不用于确认主页登录" };
   return { ...base, status: input.previousStatus === "offline" ? "offline" : "unknown", unconfirmed: true,
-    message: "主页登录尚未确认，请打开主页复核；管理后台登录不能替代主页登录" };
+    message: "主页登录尚未确认，等待主页自动复核；管理后台登录不能替代主页登录" };
 }
 
 /** Creator-session diagnostics only. These responses cannot authorize a public homepage account. */

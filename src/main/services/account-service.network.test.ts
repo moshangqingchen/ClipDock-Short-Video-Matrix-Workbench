@@ -236,6 +236,9 @@ function fixture(
     navigate: vi.fn(async () => undefined),
     show: vi.fn(),
     setMessageMode: vi.fn(),
+    canCheckHomepage: vi.fn(() => false),
+    recheckHomepage: vi.fn(async () => false),
+    finishHomepageCheck: vi.fn(async () => undefined),
     remove: vi.fn(),
   };
   const notify = vi.fn();
@@ -454,7 +457,7 @@ describe("identity checks and attempt feedback", () => {
     },
   );
 
-  it("changes an unconfirmed homepage to unknown without refreshing last-online time", async () => {
+  it("preserves a confirmed homepage conclusion when a later DOM read is inconclusive", async () => {
     const f = fixture("offline");
     const evaluate = vi.fn()
       .mockResolvedValueOnce({ kind: "online", source: "homepage", reason: "主页已登录" })
@@ -466,7 +469,7 @@ describe("identity checks and attempt feedback", () => {
     const confirmed = await f.service.checkStatus(f.account.id, { force: true });
     vi.setSystemTime(Date.now() + 60_000);
     const unavailable = await f.service.checkStatus(f.account.id, { force: true });
-    expect(unavailable.status).toBe("unknown");
+    expect(unavailable.status).toBe("online");
     expect(unavailable.lastOnlineAt).toBe(confirmed.lastOnlineAt);
     expect(unavailable.checkInfo?.state).toBe("unconfirmed");
     expect(f.session.fetch).not.toHaveBeenCalled();
@@ -684,7 +687,106 @@ describe("homepage login authority lifecycle", () => {
     f.viewPool.getWebContents.mockReturnValue(Object.assign(new EventEmitter(), { isDestroyed: () => false, executeJavaScript: evaluate }) as unknown as WebContents);
     return evaluate;
   }
-  it.each(["douyin", "kuaishou", "xiaohongshu", "bilibili"] as const)("%s only retains fresh same-process homepage authority while visiting management", async platformId => {
+  it.each(["douyin", "kuaishou", "xiaohongshu", "bilibili"] as const)("automatically confirms an unopened %s homepage during startup patrol", async platformId => {
+    const f = fixture("unknown", true, undefined, platformId);
+    f.viewPool.getState.mockReturnValue(null);
+    f.viewPool.canCheckHomepage.mockReturnValue(true);
+    f.viewPool.recheckHomepage.mockImplementation(async () => {
+      homepage(f);
+      f.viewPool.canCheckHomepage.mockReturnValue(false);
+      return true;
+    });
+    f.service.startPatrol();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(f.viewPool.recheckHomepage).toHaveBeenCalledExactlyOnceWith({ id: f.account.id, platformId });
+    expect(f.service.get(f.account.id)).toMatchObject({ status: "online", checkInfo: { homepageConfirmation: { kind: "online" } } });
+    expect(f.viewPool.finishHomepageCheck).toHaveBeenCalledExactlyOnceWith(f.account.id);
+    expect(f.session.fetch).not.toHaveBeenCalled();
+    expect(browser.wipe).not.toHaveBeenCalled();
+  });
+  it("throttles failed automatic homepage loads without dropping an earlier homepage confirmation", async () => {
+    const f = fixture("offline");
+    homepage(f);
+    const confirmed = await f.service.checkStatus(f.account.id, { force: true });
+    f.viewPool.getState.mockReturnValue(null);
+    f.viewPool.canCheckHomepage.mockReturnValue(true);
+    f.viewPool.recheckHomepage.mockRejectedValue(new Error("load failed"));
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    const failed = await f.service.checkStatus(f.account.id, { force: true });
+    expect(failed).toMatchObject({ status: "online", lastOnlineAt: confirmed.lastOnlineAt, lastCheckedAt: confirmed.lastCheckedAt, checkInfo: { state: "network_error" } });
+    await f.service.checkStatus(f.account.id, { force: true });
+    expect(f.viewPool.recheckHomepage).toHaveBeenCalledOnce();
+    expect(f.viewPool.finishHomepageCheck).toHaveBeenCalledOnce();
+  });
+  it("leaves an active data collection alone, then checks when its retry is deferred", async () => {
+    const f = fixture("unknown");
+    f.viewPool.canCheckHomepage.mockReturnValue(true);
+    const job = f.store.collectJobs.enqueue(f.account.id, "manual", false);
+    await f.service.checkStatus(f.account.id, { force: true });
+    expect(f.viewPool.recheckHomepage).not.toHaveBeenCalled();
+    f.store.db.run("UPDATE cn_jobs SET not_before=? WHERE id=?", [Date.now() + 30 * 60_000, job.id]);
+    f.viewPool.recheckHomepage.mockImplementation(async () => { homepage(f); return true; });
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("online");
+    expect(f.viewPool.recheckHomepage).toHaveBeenCalledOnce();
+  });
+  it("rejects a late automatic homepage result after network revocation and releases its temporary view", async () => {
+    const f = fixture("unknown");
+    const pending = deferred<boolean>();
+    f.viewPool.canCheckHomepage.mockReturnValue(true);
+    f.viewPool.recheckHomepage.mockReturnValue(pending.promise);
+    const checking = f.service.checkStatus(f.account.id, { force: true });
+    f.revoke();
+    f.service.suspendNetworkAccount(f.account.id);
+    homepage(f);
+    pending.resolve(true);
+    expect((await checking).status).toBe("unknown");
+    expect(f.service.get(f.account.id).checkInfo?.homepageConfirmation).toBeFalsy();
+    expect(f.viewPool.finishHomepageCheck).toHaveBeenCalledOnce();
+  });
+  it("never requests a fresh homepage navigation while its last real confirmation is still recent", async () => {
+    const f = fixture("offline");
+    homepage(f);
+    await f.service.checkStatus(f.account.id, { force: true });
+    f.viewPool.getState.mockReturnValue(null);
+    f.viewPool.canCheckHomepage.mockReturnValue(true);
+    f.service.onActivity(f.account.id, "cookies");
+    await f.service.checkStatus(f.account.id, { force: true });
+    expect(f.viewPool.recheckHomepage).not.toHaveBeenCalled();
+    expect(f.service.get(f.account.id).status).toBe("online");
+  });
+  it("rereads an automatic homepage after cookie rotation during hydration before releasing it", async () => {
+    const f = fixture("unknown");
+    f.viewPool.canCheckHomepage.mockReturnValue(true);
+    let evaluate: ReturnType<typeof homepage>;
+    f.viewPool.recheckHomepage.mockImplementation(async () => {
+      evaluate = homepage(f);
+      evaluate.mockImplementationOnce(async () => {
+        f.service.onActivity(f.account.id, "cookies");
+        return { kind: "online", source: "homepage", reason: "已显示当前账号" };
+      });
+      return true;
+    });
+    const checking = f.service.checkStatus(f.account.id, { force: true });
+    const checked = await checking;
+    expect(checked.status).toBe("online");
+    expect(checked.checkInfo?.homepageConfirmation?.kind).toBe("online");
+    expect(evaluate!).toHaveBeenCalledTimes(2);
+    expect(f.viewPool.finishHomepageCheck).toHaveBeenCalledOnce();
+  });
+  it("waits for loading to stop after automatic loadURL resolves instead of closing before DOM observation", async () => {
+    const f = fixture("unknown");
+    f.viewPool.canCheckHomepage.mockReturnValue(true);
+    f.viewPool.recheckHomepage.mockImplementation(async () => {
+      homepage(f);
+      let reads = 0;
+      f.viewPool.getState.mockImplementation(() => ({ url: getPlatform("douyin").routes.site!,
+        loading: ++reads <= 2, instanceId: 1, navigationId: 1 } as ViewState));
+      return true;
+    });
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("online");
+    expect(f.viewPool.finishHomepageCheck).toHaveBeenCalledOnce();
+  });
+  it.each(["douyin", "kuaishou", "xiaohongshu", "bilibili"] as const)("%s retains homepage authority through ordinary cookie rotation and creator activity", async platformId => {
     const f = fixture("online", true, undefined, platformId);
     expect(f.service.list()[0].status).toBe("unknown");
     const evaluate = homepage(f);
@@ -700,9 +802,10 @@ describe("homepage login authority lifecycle", () => {
     expect(f.session.fetch).not.toHaveBeenCalled();
     expect(f.session.cookies.get).not.toHaveBeenCalled();
     f.service.onActivity(f.account.id, "cookies");
-    expect(f.service.get(f.account.id).status).toBe("unknown");
+    expect(f.service.get(f.account.id).status).toBe("online");
     f.viewPool.getIdentityEvidence.mockReturnValue({ kind: "online", key: "creator-online", sequence: 2, observedAt: Date.now(), reason: "后台在线" });
-    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("unknown");
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("online");
+    expect(f.service.get(f.account.id).lastOnlineAt).toBe(confirmed.lastOnlineAt);
     expect(evaluate).toHaveBeenCalledOnce();
   });
   it("does not let creator identity overwrite a homepage logout", async () => {
@@ -715,35 +818,56 @@ describe("homepage login authority lifecycle", () => {
     await vi.advanceTimersByTimeAsync(1500);
     expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("offline");
   });
-  it("expires homepage authority instead of extending it from creator checks", async () => {
+  it("does not turn a recheck interval into a logout or refresh its confirmation time from creator checks", async () => {
     const f = fixture("offline");
     homepage(f);
-    await f.service.checkStatus(f.account.id, { force: true });
+    const confirmed = await f.service.checkStatus(f.account.id, { force: true });
     f.viewPool.getState.mockReturnValue({ url: getPlatform("douyin").routes.home } as ViewState);
     await vi.advanceTimersByTimeAsync(5 * 60_000);
-    expect(f.service.get(f.account.id).status).toBe("unknown");
-    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("unknown");
+    expect(f.service.get(f.account.id).status).toBe("online");
+    const retained = await f.service.checkStatus(f.account.id, { force: true });
+    expect(retained.status).toBe("online");
+    expect(retained.lastOnlineAt).toBe(confirmed.lastOnlineAt);
+    expect(retained.checkInfo?.homepageConfirmation).toEqual(confirmed.checkInfo?.homepageConfirmation);
     expect(f.session.fetch).not.toHaveBeenCalled();
   });
-  it("does not restore a homepage confirmation across service restart", async () => {
+  it("restores genuine homepage evidence across restart without updating its observation time", async () => {
     const f = fixture("offline");
     homepage(f);
     await f.service.checkStatus(f.account.id, { force: true });
     const lastOnlineAt = f.service.get(f.account.id).lastOnlineAt;
+    const proof = f.service.get(f.account.id).checkInfo?.homepageConfirmation;
     f.service.dispose();
+    vi.setSystemTime(Date.now() + 24 * 60 * 60_000);
     const next = new AccountService({ store: f.store, viewPool: f.viewPool as unknown as ViewPool, notify: f.notify });
     services.push(next);
-    expect(next.get(f.account.id)).toMatchObject({ status: "unknown", lastOnlineAt, checkInfo: { state: "unconfirmed" } });
+    expect(next.get(f.account.id)).toMatchObject({ status: "online", lastOnlineAt, checkInfo: { homepageConfirmation: proof } });
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("douyin").routes.home, loading: false } as ViewState);
+    expect(await next.checkStatus(f.account.id, { force: true })).toMatchObject({ status: "online", lastOnlineAt, checkInfo: { homepageConfirmation: proof } });
   });
-  it("does not keep a green status while a new homepage document is pending", async () => {
+  it("retains the last homepage conclusion while a new document is pending, then accepts its logout", async () => {
     const f = fixture("offline");
     const evaluate = homepage(f);
     await f.service.checkStatus(f.account.id, { force: true });
     f.viewPool.getState.mockReturnValue({ url: getPlatform("douyin").routes.site!, loading: true, instanceId: 1, navigationId: 2 } as ViewState);
     f.service.onActivity(f.account.id, "navigated");
-    expect(f.service.get(f.account.id).status).toBe("unknown");
-    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("unknown");
+    expect(f.service.get(f.account.id).status).toBe("online");
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("online");
     expect(evaluate).toHaveBeenCalledOnce();
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("douyin").routes.site!, loading: false, instanceId: 1, navigationId: 2 } as ViewState);
+    evaluate.mockResolvedValue({ kind: "offline", source: "homepage", reason: "主页已退出登录" });
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("offline");
+    expect(f.service.get(f.account.id).checkInfo?.homepageConfirmation?.kind).toBe("offline");
+  });
+  it("clears durable homepage evidence on an explicit session reset", async () => {
+    const f = fixture("offline");
+    homepage(f);
+    await f.service.checkStatus(f.account.id, { force: true });
+    expect(f.service.get(f.account.id).checkInfo?.homepageConfirmation?.kind).toBe("online");
+    await f.service.resetEnvironment(f.account.id);
+    expect(f.service.get(f.account.id)).toMatchObject({ status: "offline", checkInfo: null });
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("douyin").routes.home, loading: false } as ViewState);
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("offline");
   });
   it("never refreshes a hidden Channels message page but permits passive identity checks", async () => {
     const f = fixture("online", true, undefined, "weixin_channels");

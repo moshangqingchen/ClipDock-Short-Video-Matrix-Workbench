@@ -5,6 +5,7 @@ import type {
   AccountCreateInput,
   AccountStatus,
   AccountUpdateInput,
+  HomepageConfirmation,
 } from "@shared/types";
 import { getPlatform, isCnPlatformId } from "@shared/platforms";
 import { partitionForAccount } from "@main/browser/partition";
@@ -75,7 +76,19 @@ export class AccountsRepository {
   }
 
   updateCheckInfo(id: string, info: AccountCheckInfo): Account | undefined {
-    this.db.run("UPDATE accounts SET check_info_json = ? WHERE id = ?", [JSON.stringify(info), id]);
+    const current = this.get(id);
+    if (!current) return undefined;
+    // Checking/loading/network feedback is a new attempt, not a new login verdict.
+    // Only an explicit null revokes the durable homepage observation.
+    const confirmation = info.homepageConfirmation === undefined
+      ? current.checkInfo?.homepageConfirmation : info.homepageConfirmation;
+    const homepageConfirmation = readHomepageConfirmation(confirmation);
+    if (confirmation != null && !homepageConfirmation) throw new Error("主页登录证据无效");
+    const stored: AccountCheckInfo = {
+      state: info.state, reason: info.reason, attemptedAt: info.attemptedAt,
+      ...(confirmation !== undefined ? { homepageConfirmation } : {}),
+    };
+    this.db.run("UPDATE accounts SET check_info_json = ? WHERE id = ?", [JSON.stringify(stored), id]);
     return this.get(id);
   }
 
@@ -124,17 +137,23 @@ export class AccountsRepository {
     id: string,
     status: AccountStatus,
     message: string | null,
-    extra: { sessionExpiresAt?: string | null; online?: boolean } = {},
+    extra: {
+      sessionExpiresAt?: string | null;
+      online?: boolean;
+      /** Status bookkeeping without a new login observation must retain the confirmation time. */
+      preserveCheckedAt?: boolean;
+    } = {},
   ): Account | undefined {
     const now = new Date().toISOString();
     const online = extra.online ?? (status === "online" || status === "expiring");
     this.db.run(
-      `UPDATE accounts SET status = ?, status_message = ?, last_checked_at = ?,
+      `UPDATE accounts SET status = ?, status_message = ?,
+         last_checked_at = CASE WHEN ? THEN last_checked_at ELSE ? END,
          last_online_at = CASE WHEN ? THEN ? ELSE last_online_at END,
          session_expires_at = COALESCE(?, session_expires_at),
          updated_at = ?
        WHERE id = ?`,
-      [status, message, now, online ? 1 : 0, now, extra.sessionExpiresAt ?? null, now, id],
+      [status, message, extra.preserveCheckedAt ? 1 : 0, now, online ? 1 : 0, now, extra.sessionExpiresAt ?? null, now, id],
     );
     return this.get(id);
   }
@@ -208,8 +227,23 @@ function readCheckInfo(value?: string | null): AccountCheckInfo | null {
       typeof parsed.attemptedAt !== "string"
     )
       return null;
-    return parsed;
+    return {
+      state: parsed.state,
+      reason: parsed.reason,
+      attemptedAt: parsed.attemptedAt,
+      ...(parsed.homepageConfirmation !== undefined
+        ? { homepageConfirmation: readHomepageConfirmation(parsed.homepageConfirmation) } : {}),
+    };
   } catch {
     return null;
   }
+}
+
+/** Persist only a verdict and its original time; never accept arbitrary page/session payloads. */
+function readHomepageConfirmation(value: unknown): HomepageConfirmation | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { kind, observedAt } = value as Record<string, unknown>;
+  if ((kind !== "online" && kind !== "offline") || typeof observedAt !== "number" ||
+      !Number.isSafeInteger(observedAt) || observedAt < 0 || observedAt > Date.now()) return null;
+  return { kind, observedAt };
 }
