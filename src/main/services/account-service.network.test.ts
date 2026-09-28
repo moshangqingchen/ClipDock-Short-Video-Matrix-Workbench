@@ -9,6 +9,7 @@ import { AccountService, type ProfileInfo } from "./account-service";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import type { WebContents } from "electron";
+import { JSDOM } from "jsdom";
 
 const biliProbeUrl = "https://api.bilibili.com/x/web-interface/nav";
 function responseAt(response: Response, url = biliProbeUrl): Response {
@@ -828,6 +829,32 @@ describe("homepage login authority lifecycle", () => {
     f.service.onActivity(f.account.id, "identity");
     await vi.advanceTimersByTimeAsync(1500);
     expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("offline");
+  });
+  it("replaces a confirmed Kuaishou logout after in-page login without reloading or calling a creator API", async () => {
+    const f = fixture("offline", true, undefined, "kuaishou");
+    const dom = new JSDOM('<div class="workbench"><main><div class="wb-left"><div class="sidebar"><button>立即登录</button></div></div></main></div>', {
+      url: "https://www.kuaishou.com/new-reco", runScripts: "outside-only",
+    });
+    try {
+      Object.defineProperty(dom.window.document, "readyState", { value: "complete" });
+      Object.assign(dom.window, { INIT_STATE: { "tusjoh.0sftu0w0qspgjmf0hfu-pckfdu.": { result: 109 } } });
+      f.viewPool.getState.mockReturnValue({ url: dom.window.location.href, visible: true, loading: false, instanceId: 1, navigationId: 1 } as ViewState);
+      const executeJavaScript = vi.fn(async (script: string) => dom.window.eval(script));
+      f.viewPool.getWebContents.mockReturnValue(Object.assign(new EventEmitter(), { isDestroyed: () => false, executeJavaScript }) as unknown as WebContents);
+      expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("offline");
+      f.service.startPatrol();
+      // The page updates after QR login; the original SSR guest response stays unchanged.
+      dom.window.document.querySelector('.sidebar')!.innerHTML = '<div class="down"><div class="down-box login"><div class="user item"><img class="image" src="https://p66.a.kwimgs.com/self.jpg"><div class="text">登录后的账号</div></div></div></div>';
+      f.service.onActivity(f.account.id, "cookies");
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(f.service.get(f.account.id)).toMatchObject({ status: "online", displayName: "登录后的账号",
+        checkInfo: { homepageConfirmation: { kind: "online" } } });
+      expect(f.viewPool.navigate).not.toHaveBeenCalled();
+      expect(f.viewPool.recheckHomepage).not.toHaveBeenCalled();
+      expect(f.session.fetch).not.toHaveBeenCalled();
+      expect(f.session.cookies.get).not.toHaveBeenCalled();
+      expect(browser.wipe).not.toHaveBeenCalled();
+    } finally { f.service.stopPatrol(); dom.window.close(); }
   });
   it("does not turn a recheck interval into a logout or refresh its confirmation time from creator checks", async () => {
     const f = fixture("offline");

@@ -114,20 +114,41 @@ describe("homepage current-account avatar extraction", () => {
   });
   it.each([
     ["missing live account", ""],
-    ["different account name", kuaishouSidebar("另一个账号")],
-    ["different avatar", kuaishouSidebar("当前账号", "https://p66.a.kwimgs.com/other.jpg")],
+    ["missing account name", kuaishouSidebar("")],
+    ["hidden account name", kuaishouSidebar().replace('class="text"', 'class="text" hidden')],
+    ["hidden avatar", kuaishouSidebar().replace('class="image"', 'class="image" hidden')],
+    ["untrusted avatar", kuaishouSidebar("当前账号", "http://p66.a.kwimgs.com/own.jpg")],
+    ["placeholder avatar", kuaishouSidebar("当前账号", "https://p66.a.kwimgs.com/default-avatar.jpg")],
+    ["ambiguous sidebars", kuaishouSidebar() + kuaishouSidebar()],
+    ["ambiguous account controls", kuaishouSidebar().replace('<div class="user item">', '<div class="user item"></div><div class="user item">')],
     ["feed author", `<article>${kuaishouSidebar()}</article>`],
     ["hidden sidebar", `<div hidden>${kuaishouSidebar()}</div>`],
     ["signed-out sidebar", kuaishouSidebar().replace('down-box login', 'down-box')],
   ])("does not authenticate Kuaishou from stale self data: %s", (_name, body) => {
     expect(read("kuaishou", body, kuaishouSelf).kind).toBe("unconfirmed");
   });
-  it("waits for Kuaishou hydration and a successful self response", () => {
+  it("waits for Kuaishou hydration but accepts live login without an SSR self response", () => {
     expect(read("kuaishou", kuaishouSidebar(), kuaishouSelf, { loading: true }).kind).toBe("unconfirmed");
-    expect(read("kuaishou", kuaishouSidebar()).kind).toBe("unconfirmed");
+    expect(read("kuaishou", kuaishouSidebar())).toMatchObject({ kind: "online", displayName: "当前账号" });
     expect(read("kuaishou", kuaishouSidebar(), {
       INIT_STATE: { "tusjoh.0sftu0w0qspgjmf0hfu-pckfdu.": { ...kuaishouSelf.INIT_STATE["tusjoh.0sftu0w0qspgjmf0hfu-pckfdu."], result: 109 } },
-    }).kind).toBe("unconfirmed");
+    }).kind).toBe("online");
+  });
+  it("does not treat a Kuaishou guest login label as an account nickname", () => {
+    expect(read("kuaishou", kuaishouSidebar("立即登录"), kuaishouSelf).kind).toBe("offline");
+  });
+  it("uses Kuaishou's rendered nickname and avatar after a profile edit instead of its old SSR snapshot", () => {
+    expect(read("kuaishou", kuaishouSidebar("新昵称", "https://p66.a.kwimgs.com/new.jpg"), kuaishouSelf))
+      .toMatchObject({ kind: "online", displayName: "新昵称", avatarUrl: "https://p66.a.kwimgs.com/new.jpg" });
+  });
+  it.each([true, false])("uses the live Kuaishou account over a stale Nuxt login flag (%s)", isLogin => {
+    expect(read("kuaishou", kuaishouSidebar(), { __NUXT__: { state: { user: {
+      isLogin, userInfo: { userId: "previous", userName: "旧昵称", headUrl: "https://p66.a.kwimgs.com/old.jpg" },
+    } } } })).toMatchObject({ kind: "online", displayName: "当前账号", avatarUrl: "https://p66.a.kwimgs.com/own.jpg" });
+  });
+  it("keeps conflicting Kuaishou account and guest controls unconfirmed", () => {
+    expect(read("kuaishou", kuaishouSidebar().replace('<div class="down">', '<button>立即登录</button><div class="down">')).kind)
+      .toBe("unconfirmed");
   });
   it.each([
     [

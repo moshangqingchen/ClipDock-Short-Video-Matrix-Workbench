@@ -236,27 +236,35 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
           domAvatars.add(Array.from(selfAvatars)[0]);
         }
       }
-      // The current Kuaishou homepage uses a clickable sidebar div, not a
-      // header profile link. Match the rendered account against the one fixed
-      // self-profile response slot; never inspect feed/profile-author entries.
+      // Kuaishou replaces this dedicated sidebar account control after QR
+      // login without updating the original SSR INIT_STATE. The visible live
+      // control is authoritative; matching its name/avatar to that old snapshot
+      // would leave a successful in-page login stuck at the previous logout.
+      const sidebarRoots = platform === 'kuaishou' ? Array.from(document.querySelectorAll(
+        '.workbench > main > .wb-left > .sidebar'
+      )).filter(root => visible(root) && !root.closest('article,.video-card,.note-item')) : [];
       if (platform === 'kuaishou' && document.readyState !== 'loading') {
-        const self = read(window, ['INIT_STATE', 'tusjoh.0sftu0w0qspgjmf0hfu-pckfdu.']);
-        if (self?.result === 1 && hasId(self) && typeof self.userName === 'string' && self.userName.trim()) {
-          const expectedAvatar = safeAvatarUrl(self.userHead);
-          // Kuaishou wraps both navigation and feed in <main>; scope directly
-          // to its left navigation instead of the generic feed exclusion.
-          const roots = Array.from(document.querySelectorAll('.workbench > main > .wb-left > .sidebar > .down > .down-box.login > .user.item'))
-            .filter(node => visible(node) && !node.closest('article, .video-card, .note-item'));
-          for (const root of roots) {
-            const label = root.querySelector(':scope > .text');
-            const img = root.querySelector(':scope > img.image');
-            const avatar = img && visible(img) && safeAvatarUrl(img.currentSrc || img.getAttribute('src'));
-            if (label && label.textContent.trim() === self.userName.trim() &&
-                expectedAvatar && avatar === expectedAvatar) {
-              accountAvatar = true;
-              domAvatars.add(avatar);
-              storeNames.add(self.userName.trim().slice(0, 60));
-            }
+        // Both the navigation and the feed live inside <main>. Scope directly
+        // to one visible left sidebar and one signed-in account control.
+        const roots = sidebarRoots.length === 1 ? Array.from(sidebarRoots[0].querySelectorAll(
+          ':scope > .down > .down-box.login > .user.item'
+        )).filter(node => visible(node)) : [];
+        if (roots.length === 1) {
+          const root = roots[0];
+          const labels = Array.from(root.querySelectorAll(':scope > .text')).filter(visible);
+          const images = Array.from(root.querySelectorAll(':scope > img.image')).filter(visible);
+          const name = labels.length === 1 ? labels[0].textContent.trim() : '';
+          const img = images.length === 1 ? images[0] : undefined;
+          const avatar = img && safeAvatarUrl(img.currentSrc || img.getAttribute('src'));
+          if (name && name.length <= 60 && !/^(?:登录|立即登录|登录注册|登录\\/注册|去登录|游客)$/.test(name.replace(/\\s+/g, '')) && avatar) {
+            accountAvatar = true;
+            domAvatars.add(avatar);
+            // The live sidebar also supersedes any pre-login SSR nickname.
+            storeNames.clear();
+            storeNames.add(name);
+            storeAvatars.clear();
+            storeAvatars.add(avatar);
+            storeLoggedOut = false;
           }
         }
       }
@@ -284,9 +292,6 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
       // The current Kuaishou guest control is in its left sidebar inside main.
       // Keep this narrowly scoped so feed cards asking visitors to login cannot
       // override the current account. The wrapper itself may include extra copy.
-      const sidebarRoots = platform === 'kuaishou' ? Array.from(document.querySelectorAll(
-        '.workbench > main > .wb-left > .sidebar'
-      )).filter(root => visible(root) && !root.closest('article,.video-card,.note-item')) : [];
       const sidebarLogin = sidebarRoots.length === 1 &&
         Array.from(sidebarRoots[0].querySelectorAll('button,a,[role="button"],.login-btn,.login-button,.login,.text'))
           .some(node => visible(node) && isLoginEntry(node));
