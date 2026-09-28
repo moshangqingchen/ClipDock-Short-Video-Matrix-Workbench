@@ -3,8 +3,18 @@ import { decideTopLevelNavigation } from "@main/browser/navigation-policy";
 import type { ViewPool } from "@main/browser/view-pool";
 import type { AccountService } from "@main/services/account-service";
 import type { IpcRegistrar } from "../register";
+import { openOfficialMessages } from "@main/browser/open-messages";
 
 export function registerViewHandlers(ipc: IpcRegistrar, pool: ViewPool, accounts: AccountService): void {
+  const messageFlights = new Map<string, ReturnType<typeof openOfficialMessages>>();
+  ipc.handleValidated(IPC.viewOpenMessages, accountIdSchema, async (_e, id) => {
+    const existing = messageFlights.get(id);
+    if (existing) return existing;
+    const task = openOfficialMessages(id, pool, accounts);
+    messageFlights.set(id, task);
+    try { return await task; }
+    finally { if (messageFlights.get(id) === task) messageFlights.delete(id); }
+  });
   ipc.handle(IPC.viewShow, (_e, id: unknown, bounds: unknown, enterHomepage: unknown = false) => {
     if (typeof enterHomepage !== "boolean") throw new Error("主页入口参数无效");
     return accounts.showView(accountIdSchema.parse(id), boundsSchema.parse(bounds), enterHomepage);
@@ -25,6 +35,7 @@ export function registerViewHandlers(ipc: IpcRegistrar, pool: ViewPool, accounts
     if (decision.action !== "allow") throw new Error("该地址不属于此平台,已拒绝在账号环境内打开");
     accounts.prepareNetworkOperation(accountId, "view-navigate", decision.url);
     accounts.ensureView(accountId);
+    pool.setMessageMode(accountId, false);
     await pool.navigate(accountId, decision.url);
   });
   ipc.handle(IPC.viewGo, (_e, id: unknown, route: unknown) =>
@@ -38,6 +49,7 @@ export function registerViewHandlers(ipc: IpcRegistrar, pool: ViewPool, accounts
     const decision = decideTopLevelNavigation(account.platformId, target);
     if (decision.action !== "allow") throw new Error("该历史地址不属于此平台，已拒绝打开");
     accounts.prepareNetworkOperation(id, "view-navigate", decision.url);
+    pool.setMessageMode(id, false);
     if (direction === "back") pool.back(id);
     else pool.forward(id);
   };

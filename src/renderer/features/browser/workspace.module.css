@@ -167,6 +167,23 @@
   min-height: 0;
   min-width: 0;
 }
+.messageBar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elev);
+  color: var(--brand-600);
+}
+.messageBar > div { flex: 1; min-width: 0; }
+.messageBar strong { font-size: var(--text-sm); }
+.messageBar p { margin: 4px 0; color: var(--fg-muted); font-size: var(--text-xs); line-height: 1.5; }
+.messageBar small { color: var(--fg-subtle); font-size: 11px; }
+@media (max-width: 1000px) {
+  .messageBar { gap: 8px; padding: 10px; flex-wrap: wrap; }
+}
 .host {
   position: absolute;
   inset: 0;

@@ -453,6 +453,7 @@ export function createPreviewApi(): WorkbenchApi {
       refreshProfile: async (id) => accounts.find((a) => a.id === id)!,
     },
     views: {
+      openMessages: async () => ({ opened: false, guidance: "请在桌面端打开账号的官方消息页。" }),
       show: async (id, _bounds) => {
         const state: ViewState = {
           accountId: id,

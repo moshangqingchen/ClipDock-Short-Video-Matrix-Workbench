@@ -260,6 +260,97 @@ describe("ViewPool ownership through actual destruction", () => {
     expect(() => accountForWebContents(old)).toThrow();
   });
 
+  it("retains a message page and its account partition across switches, hides and LRU pressure", async () => {
+    const f = fixture();
+    const first = f.create("first");
+    const bounds = { x: 0, y: 0, width: 640, height: 480 };
+    f.pool.setMessageMode("first", true);
+    await f.pool.navigate("first", "https://message.bilibili.com/#/whisper");
+    await f.pool.show(account("first"), bounds, true);
+    f.pool.hide("first");
+    f.create("second");
+    f.create("third");
+    await vi.advanceTimersByTimeAsync(3 * 60_000);
+    expect(first.close).not.toHaveBeenCalled();
+    expect(f.pool.getState("first")).toMatchObject({ messageMode: true, visible: false });
+    await f.pool.show(account("first"), bounds, true);
+    expect(f.pool.getWebContents("first")).toBe(first);
+    expect(first.loadURL).toHaveBeenCalledExactlyOnceWith("https://message.bilibili.com/#/whisper");
+    expect(fixtures.sessions.filter(session => session.partition === "persist:test-first")).toHaveLength(1);
+    f.pool.hide("first");
+    f.pool.setMessageMode("first", false);
+    // Make the released message page the LRU candidate again.
+    await vi.advanceTimersByTimeAsync(1);
+    f.pool.ensure(account("third"), { navigate: false });
+    f.create("fourth");
+    expect(first.close).toHaveBeenCalledOnce();
+  });
+
+  it("refuses background navigation of a pinned message page until explicit release", async () => {
+    const f = fixture();
+    const wc = f.create("one");
+    f.pool.setMessageMode("one", true);
+    await f.pool.navigate("one", "https://message.bilibili.com/#/whisper");
+    await f.pool.navigate("one", getPlatform("bilibili").routes.home, { background: true });
+    expect(wc.loadURL).toHaveBeenCalledTimes(1);
+    expect(f.pool.getState("one")?.messageMode).toBe(true);
+    f.pool.setMessageMode("one", false);
+    await f.pool.navigate("one", getPlatform("bilibili").routes.home, { background: true });
+    expect(wc.loadURL).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidates a collector navigation waiting on session initialization before opening messages", async () => {
+    const f = fixture();
+    const wc = f.create("one");
+    let ready!: () => void;
+    fixtures.sessions[0].ready = new Promise<void>(resolve => { ready = resolve; });
+    const background = f.pool.navigate("one", getPlatform("bilibili").routes.home, { background: true });
+    f.pool.setMessageMode("one", true);
+    const messages = f.pool.navigate("one", "https://message.bilibili.com/#/whisper");
+    ready();
+    await Promise.all([background, messages]);
+    expect(wc.loadURL).toHaveBeenCalledExactlyOnceWith("https://message.bilibili.com/#/whisper");
+  });
+
+  it("never starts a delayed load after its view has begun closing", async () => {
+    const f = fixture();
+    const wc = f.create("one");
+    let ready!: () => void;
+    fixtures.sessions[0].ready = new Promise<void>(resolve => { ready = resolve; });
+    const background = f.pool.navigate("one", getPlatform("bilibili").routes.home, { background: true });
+    f.pool.remove("one");
+    ready();
+    await background;
+    expect(wc.loadURL).not.toHaveBeenCalled();
+  });
+
+  it("does not retry or surface a stale collector error over the newly opened message page", async () => {
+    const f = fixture();
+    const wc = f.create("one");
+    let reject!: (error: unknown) => void;
+    wc.loadURL.mockImplementationOnce(() => new Promise<void>((_resolve, no) => { reject = no; }));
+    const background = f.pool.navigate("one", getPlatform("bilibili").routes.home, { background: true });
+    await Promise.resolve();
+    f.pool.setMessageMode("one", true);
+    await f.pool.navigate("one", "https://message.bilibili.com/#/whisper");
+    reject(Object.assign(new Error("old request failed"), { errno: -105 }));
+    await background;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(wc.loadURL).toHaveBeenCalledTimes(2);
+    expect(f.pool.getState("one")?.lastError).toBeNull();
+  });
+
+  it("still force-closes protected messages when network access is revoked", async () => {
+    const f = fixture();
+    const wc = f.create("one");
+    f.pool.setMessageMode("one", true);
+    const revoked = f.pool.suspendNetworkAccount("one");
+    expect(wc.close).toHaveBeenCalledExactlyOnceWith({ waitForBeforeUnload: false });
+    expect(f.pool.has("one")).toBe(false);
+    wc.destroy();
+    await revoked;
+  });
+
   it("emits a versioned destroyed state on recycling and rebuilds crashed pages with the same partition", async () => {
     const f = fixture();
     const states: ViewState[] = [];

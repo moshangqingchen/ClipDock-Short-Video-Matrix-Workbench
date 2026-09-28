@@ -50,6 +50,7 @@ const eligible = (account: Account) => account.status === "online" || account.st
 class JobCancelledError extends Error {}
 class IdentityNotReadyError extends Error {}
 class CollectionContextChangedError extends Error {}
+class MessagePageInUseError extends Error {}
 function wait(milliseconds: number, _value?: undefined, options?: { signal?: AbortSignal }): Promise<void> {
   return new Promise((resolve, reject) => {
     const signal = options?.signal;
@@ -140,8 +141,9 @@ export class CollectScheduler {
   }
 
   private shouldSkipHomepage(account: Account, trigger: Trigger): boolean {
-    if (trigger === "manual") return false;
     const page = this.options.pool.getState(account.id);
+    if (page?.messageMode) return true;
+    if (trigger === "manual") return false;
     return Boolean(page?.visible && (isHomepageContext(account.platformId, page.url) || /(?:upload|publish|(?:^|[/_-])edit(?:or)?(?:[/?#_-]|$)|\/post\/create)/i.test(page.url)));
   }
 
@@ -150,7 +152,9 @@ export class CollectScheduler {
     if (this.running.has(job.accountId)) return;
     const claimed = this.options.store.collectJobs.transition(job.id, ["queued", "waiting-network"], "running");
     if (!claimed) return;
-    this.finish(claimed, new Date().toISOString(), "skipped", "正在浏览主页，已跳过后台采集，当前页面和账号资料已保留");
+    this.finish(claimed, new Date().toISOString(), "skipped", this.options.pool.getState(job.accountId)?.messageMode
+      ? "正在查看或回复消息，已跳过采集；离开消息页面后可重新采集"
+      : "正在浏览主页，已跳过后台采集，当前页面和账号资料已保留");
   }
 
   /** Accept immediately. Repeated buttons/ticks reuse the same active task ID. */
@@ -283,6 +287,9 @@ export class CollectScheduler {
     const now = Date.now();
     for (const account of this.options.accounts.list()) {
       if (!eligible(account)) continue;
+      // A pinned inbox may hold an unsent draft even while hidden. Do not
+      // repeatedly enqueue skipped collection/keepalive work against it.
+      if (this.options.pool.getState(account.id)?.messageMode) continue;
       // Older versions deliberately discarded remote image URLs. Read fresh
       // sources once using the account's collector, without disturbing its
       // foreground homepage or repeatedly retrying an unavailable image.
@@ -396,7 +403,10 @@ export class CollectScheduler {
     try {
       const collector = collectors.get(account.platformId);
       lease = beginBusinessOperation(account.id, collector?.workingUrl);
-      const check = () => this.assertCurrent(job, active, lease!);
+      const check = () => {
+        this.assertCurrent(job, active, lease!);
+        if (this.options.pool.getState(account.id)?.messageMode) throw new MessagePageInUseError();
+      };
       const signal = AbortSignal.any([lease.signal, active.abort.signal, deadline.signal]);
       check();
       const immediate = job.trigger === "manual" || job.trigger === "login";
@@ -419,6 +429,7 @@ export class CollectScheduler {
       if (job.trigger === "keepalive") {
         const checked = await withBusinessTaskSignal(signal, () => accounts.checkStatus(account.id,
           account.platformId === "weixin_channels" ? { force: true, refreshPage: true } : undefined));
+        if (this.options.pool.getState(account.id)?.messageMode) throw new MessagePageInUseError();
         lease.assertCurrent();
         if (this.stopped || active.abort.signal.aborted || store.collectJobs.get(job.id)?.state !== "running")
           return;
@@ -463,7 +474,8 @@ export class CollectScheduler {
           return evidence?.kind === "online" && evidence.profile ? evidence : null;
         };
         if (!fresh()) {
-          await this.options.pool.navigate(account.id, wc.getURL());
+          check();
+          await this.options.pool.navigate(account.id, wc.getURL(), { background: true });
           await waitForIdle(wc, PAGE_READY_TIMEOUT_MS, signal);
           const deadline = Date.now() + 5000;
           while (!fresh() && Date.now() < deadline) {
@@ -588,6 +600,12 @@ export class CollectScheduler {
       if (current?.paused) return;
       if (!current || current.state === "cancelled" || current.state === "done" || current.state === "failed")
         return;
+      if (current.state === "running" && (error instanceof MessagePageInUseError ||
+          this.options.pool.getState(account.id)?.messageMode)) {
+        this.finish(job, startedAt, "skipped", "正在查看或回复消息，已停止本次采集；已保存的数据保留",
+          metricsWrittenTotal, worksWrittenTotal);
+        return;
+      }
       if (
         isNetworkDormantError(error) ||
         this.suspended.has(account.id) ||
@@ -762,7 +780,7 @@ export class CollectScheduler {
       if (entry.visible) return null;
       check();
       try {
-        await pool.navigate(account.id, workingUrl);
+        await pool.navigate(account.id, workingUrl, { background: true });
       } catch (error) {
         check();
         if (isNetworkDormantError(error)) throw error;

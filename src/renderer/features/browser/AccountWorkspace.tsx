@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PlatformLogo } from "@renderer/components/ui/PlatformLogo";
 import { AccountLoginStatus } from "@renderer/components/ui/AccountLoginStatus";
 import {
@@ -12,6 +12,7 @@ import {
   ListVideo,
   Lock,
   MessageSquare,
+  MessagesSquare,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
@@ -104,6 +105,10 @@ function Workspace({ account }: { account: Account }) {
   const [hostError, setHostError] = useState<string | null>(null);
   const [dismissedError, setDismissedError] = useState<string | null>(null);
   const [observing, setObserving] = useState(false);
+  const [openingMessages, setOpeningMessages] = useState(false);
+  const [messageGuidance, setMessageGuidance] = useState("");
+  const messageRequest = useRef(0);
+  useEffect(() => () => { messageRequest.current++; }, []);
   const pushOverlay = useUi((s) => s.pushOverlay);
   const popOverlay = useUi((s) => s.popOverlay);
 
@@ -123,6 +128,9 @@ function Workspace({ account }: { account: Account }) {
 
   const go = useCallback(
     (route: QuickRoute) => {
+      messageRequest.current++;
+      setOpeningMessages(false);
+      setMessageGuidance("");
       setObserving(false);
       void api.views
         .go(account.id, route)
@@ -132,6 +140,22 @@ function Workspace({ account }: { account: Account }) {
     },
     [account.id],
   );
+
+  const openMessages = useCallback(async () => {
+    const request = ++messageRequest.current;
+    setObserving(false);
+    toggleDrawer(false);
+    setOpeningMessages(true);
+    try {
+      const result = await api.views.openMessages(account.id);
+      if (request === messageRequest.current) setMessageGuidance(result.guidance);
+    } catch (error) {
+      if (request === messageRequest.current)
+        useToasts.getState().push({ kind: "error", title: "消息页面未打开", message: error instanceof Error ? error.message : "请稍后重试" });
+    } finally {
+      if (request === messageRequest.current) setOpeningMessages(false);
+    }
+  }, [account.id, toggleDrawer]);
 
   // The observe panel is rendered over the pane, so the native view must be
   // hidden while it is open (it would otherwise paint above the panel). The
@@ -147,6 +171,9 @@ function Workspace({ account }: { account: Account }) {
     setEditing(false);
     const target = address.trim();
     if (!target || target === view?.url) return;
+    messageRequest.current++;
+    setOpeningMessages(false);
+    setMessageGuidance("");
     void api.views
       .navigate(account.id, target)
       .catch((error: Error) =>
@@ -242,9 +269,10 @@ function Workspace({ account }: { account: Account }) {
               ...quickLinks.map((q) => ({
                 icon: q.icon,
                 label: q.label,
-                active: !observing && activeQuick === q.route,
+                active: !observing && !view?.messageMode && activeQuick === q.route,
                 onClick: () => go(q.route),
               })),
+              { icon: MessagesSquare, label: openingMessages ? "正在打开消息" : "消息", active: !observing && Boolean(view?.messageMode), onClick: () => { if (!openingMessages) void openMessages(); } },
               { icon: Activity, label: "数据观测", active: observing, onClick: toggleObserve },
             ]}
           />
@@ -269,6 +297,17 @@ function Workspace({ account }: { account: Account }) {
       </header>
 
       <div className={styles.hostWrap}>
+        {view?.messageMode || openingMessages ? (
+          <section className={styles.messageBar} aria-label="消息与对话">
+            <MessagesSquare size={18} />
+            <div>
+              <strong>{platform.shortName} · 消息与对话</strong>
+              <p>{openingMessages ? "正在打开当前账号的官方消息入口…" : messageGuidance || "消息页面已保留，可继续在官方对话框查看和回复。"}</p>
+              <small>当前账号：{account.displayName} · 消息页面保留期间暂停该账号采集</small>
+            </div>
+            <Button size="sm" variant="secondary" onClick={() => go(platform.routes.site ? "site" : "home")}>离开消息</Button>
+          </section>
+        ) : null}
         {observing ? <ObservePanel account={account} onClose={toggleObserve} /> : null}
         <div className={styles.pageSurface}>
         {hasBridge ? (

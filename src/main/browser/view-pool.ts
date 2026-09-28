@@ -51,6 +51,7 @@ interface LiveView {
   disposeNetworkBinding: () => void;
   attached: boolean;
   visible: boolean;
+  messageMode: boolean;
   lastUsedAt: number;
   homepageRetainUntil: number;
   lastError: string | null;
@@ -110,6 +111,19 @@ export class ViewPool extends EventEmitter {
     return entry ? this.toState(entry) : null;
   }
 
+  /** Official messaging owns this page until an explicit user navigation leaves it. */
+  setMessageMode(accountId: string, enabled: boolean): void {
+    const entry = this.live.get(accountId);
+    if (!entry || entry.webContents.isDestroyed()) throw new Error("view-not-live");
+    if (entry.messageMode === enabled) return;
+    entry.messageMode = enabled;
+    // Invalidate delayed loads before a message navigation is issued. In
+    // particular, session initialization may still be holding an old collector load.
+    entry.navigationVersion++;
+    if (enabled && entry.webContents.isLoading()) entry.webContents.stop();
+    this.emitState(entry);
+  }
+
   /** WebContents for read-only in-session scripting (collectors, detectors). */
   getWebContents(accountId: string): WebContents | null {
     const entry = this.live.get(accountId);
@@ -162,7 +176,7 @@ export class ViewPool extends EventEmitter {
     entry.lastUsedAt = Date.now();
     if (opts.navigate !== false && !entry.navigated) {
       entry.navigated = true;
-      void this.load(entry, getPlatform(account.platformId).routes.home).catch(() => undefined);
+      void this.load(entry, getPlatform(account.platformId).routes.home, false, true).catch(() => undefined);
     }
     return entry;
   }
@@ -221,12 +235,13 @@ export class ViewPool extends EventEmitter {
     this.applyBounds(entry, bounds);
   }
 
-  async navigate(accountId: string, url: string): Promise<void> {
+  async navigate(accountId: string, url: string, options: { background?: boolean } = {}): Promise<void> {
     assertBusinessNetwork(accountId, url);
     const entry = this.live.get(accountId);
     if (!entry) throw new Error("view-not-live");
+    if (options.background && entry.messageMode) return;
     entry.navigated = true;
-    await this.load(entry, url);
+    await this.load(entry, url, false, options.background);
   }
 
   reload(accountId: string): void {
@@ -363,6 +378,7 @@ export class ViewPool extends EventEmitter {
       disposeNetworkBinding: () => undefined,
       attached: false,
       visible: false,
+      messageMode: false,
       lastUsedAt: Date.now(),
       homepageRetainUntil: 0,
       lastError: null,
@@ -444,7 +460,7 @@ export class ViewPool extends EventEmitter {
     });
   }
 
-  private async load(entry: LiveView, url: string, retry = false): Promise<void> {
+  private async load(entry: LiveView, url: string, retry = false, background = false): Promise<void> {
     const wc = entry.webContents;
     if (wc.isDestroyed()) return;
     const navigationVersion = ++entry.navigationVersion;
@@ -453,7 +469,8 @@ export class ViewPool extends EventEmitter {
     try {
       await entry.session.ready;
       operation.assertCurrent();
-      if (wc.isDestroyed()) return;
+      if (wc.isDestroyed() || entry.closePromise || navigationVersion !== entry.navigationVersion ||
+          background && entry.messageMode) return;
       const loading = wc.loadURL(url);
       pageVersion = entry.pageVersion;
       await loading;
@@ -468,11 +485,14 @@ export class ViewPool extends EventEmitter {
         failure = revoked;
       }
       if (isNetworkDormantError(failure)) {
-        entry.lastError = "等待国内网络";
-        this.emitState(entry);
+        if (navigationVersion === entry.navigationVersion && !entry.closePromise) {
+          entry.lastError = "等待国内网络";
+          this.emitState(entry);
+        }
         throw failure;
       }
       if (failure !== error) throw failure;
+      if (navigationVersion !== entry.navigationVersion || entry.closePromise || background && entry.messageMode) return;
       const code = (error as { errno?: number; code?: string }).errno ?? (error as { code?: string }).code;
       // ERR_ABORTED is Chromium's "superseded by another navigation" and is
       // routine on login shells that redirect client-side.
@@ -494,7 +514,7 @@ export class ViewPool extends EventEmitter {
           !wc.isDestroyed() &&
           canUseBusinessNetwork(entry.account.id)
         )
-          await this.load(entry, url, true);
+          await this.load(entry, url, true, background);
       }
     } finally {
       operation.release();
@@ -523,6 +543,7 @@ export class ViewPool extends EventEmitter {
     while (this.live.size + needed > this.maxLive) {
       const candidates = [...this.live.values()]
         .filter((entry) => !entry.visible)
+        .filter((entry) => !entry.messageMode)
         .filter((entry) => !this.isOnLoginPage(entry))
         .filter((entry) => entry.homepageRetainUntil <= Date.now())
         .sort((a, b) => a.lastUsedAt - b.lastUsedAt);
@@ -637,6 +658,7 @@ export class ViewPool extends EventEmitter {
       navigationId: entry.pageVersion,
       attached: entry.attached,
       visible: entry.visible,
+      messageMode: entry.messageMode,
       url,
       title: destroyed ? "" : wc.getTitle(),
       loading: destroyed ? false : wc.isLoading(),

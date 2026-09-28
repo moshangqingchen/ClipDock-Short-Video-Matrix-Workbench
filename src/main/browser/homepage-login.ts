@@ -15,6 +15,11 @@ const PUBLIC_HOSTS: Partial<Record<PlatformId, string>> = {
   bilibili: "www.bilibili.com",
 };
 
+export const HOMEPAGE_CONFIRMATION_TTL_MS = 5 * 60_000;
+export function requiresHomepageLogin(platformId: PlatformId): boolean {
+  return Boolean(getPlatform(platformId).routes.site);
+}
+
 /** Public-site checks must never consume a creator console's authentication state. */
 export function isHomepageContext(platformId: PlatformId, url: string): boolean {
   try {
@@ -48,7 +53,7 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
     const verificationPaths = ${JSON.stringify(verificationPaths)};
     const result = (kind, reason, avatarUrl) => ({ kind, reason, source: 'homepage',
       ...(kind === 'online' && avatarUrl ? { avatarUrl } : {}) });
-    const unknown = () => result('unconfirmed', '主页登录信息尚未加载或未能识别，保留上次状态');
+    const unknown = () => result('unconfirmed', '主页登录信息尚未加载或未能识别，等待主页确认');
     try {
       const page = new URL(location.href);
       // Mirror shared isVerificationUrl using the same platform registry. A
@@ -256,7 +261,17 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
         kuaishou: 'header .login-button, header .login-btn, .header .login-button, .header .login-btn, .header-login',
         bilibili: '.bili-header .header-login-entry, #bili-header-container .header-login-entry, .bili-mini-header .header-login-entry',
       };
-      const loginEntry = elements(loginSelectors[platform]).some(node => /^(?:登录|登录注册|登录\\/注册|立即登录|去登录|登录体验更多|Login|Signin)$/i.test(text(node)));
+      const isLoginEntry = node => /^(?:登录|登录注册|登录\\/注册|立即登录|去登录|登录体验更多|Login|Signin)$/i.test(text(node));
+      // The current Kuaishou guest control is in its left sidebar inside main.
+      // Keep this narrowly scoped so feed cards asking visitors to login cannot
+      // override the current account. The wrapper itself may include extra copy.
+      const sidebarRoots = platform === 'kuaishou' ? Array.from(document.querySelectorAll(
+        '.workbench > main > .wb-left > .sidebar'
+      )).filter(root => visible(root) && !root.closest('article,.video-card,.note-item')) : [];
+      const sidebarLogin = sidebarRoots.length === 1 &&
+        Array.from(sidebarRoots[0].querySelectorAll('button,a,[role="button"],.login-btn,.login-button,.login,.text'))
+          .some(node => visible(node) && isLoginEntry(node));
+      const loginEntry = sidebarLogin || elements(loginSelectors[platform]).some(isLoginEntry);
       // A persisted SSR store can still claim login after a real logout. A
       // rendered login entry takes precedence; conflicting live controls or
       // a partially rendered transition cannot confirm either state.

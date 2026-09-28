@@ -7,6 +7,7 @@ import {
   bodyLooksLoggedOut,
   buildInPageProbeScript,
   detectLoginState as detect,
+  detectCreatorLoginState,
   hasSessionCookies,
   type DetectionInput,
   type ProbeResponse,
@@ -62,7 +63,7 @@ beforeEach(() => {
 });
 afterEach(() => disposeNetwork());
 const detectLoginState = (input: Omit<DetectionInput, "accountId">) =>
-  detect({ ...input, accountId: "00000000-0000-4000-8000-000000000001" });
+  detectCreatorLoginState({ ...input, accountId: "00000000-0000-4000-8000-000000000001" });
 
 function cookie(domain: string, name: string, value = "x"): Cookie {
   return {
@@ -97,6 +98,8 @@ function fakeSession(
 }
 
 describe("homepage authentication", () => {
+  const detectLoginState = (input: Omit<DetectionInput, "accountId">) =>
+    detect({ ...input, accountId: "00000000-0000-4000-8000-000000000001" });
   it.each(["douyin", "kuaishou", "xiaohongshu", "bilibili"] as const)(
     "trusts the %s homepage login without creator API or cookie/TTL heuristics",
     async (platformId) => {
@@ -116,14 +119,14 @@ describe("homepage authentication", () => {
     },
   );
 
-  it("preserves the last status while the homepage loads instead of falling back to the creator API", async () => {
+  it("does not keep an unconfirmed homepage green while it loads", async () => {
     const probe = vi.fn(async () => ({ status: 401, text: "" }));
     const result = await detectLoginState({
       platformId: "xiaohongshu", session: fakeSession([]),
       currentUrl: getPlatform("xiaohongshu").routes.site, loading: true, previousStatus: "online", probe,
       homepage: { kind: "offline", source: "homepage", reason: "旧页面未登录" },
     });
-    expect(result).toMatchObject({ status: "online", source: "homepage", unconfirmed: true });
+    expect(result).toMatchObject({ status: "unknown", source: "homepage", unconfirmed: true });
     expect(probe).not.toHaveBeenCalled();
   });
 
@@ -134,9 +137,25 @@ describe("homepage authentication", () => {
       currentUrl: getPlatform("xiaohongshu").routes.home, previousStatus: "online", probe,
       homepage: { kind: "online", source: "homepage", reason: "wrong context" },
     });
-    expect(result.status).toBe("offline");
-    expect(result.source).toBeUndefined();
-    expect(probe).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ status: "unknown", source: "homepage", unconfirmed: true });
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it.each(["douyin", "kuaishou", "xiaohongshu", "bilibili"] as const)("%s never uses creator cookies, identity or a successful API as homepage authority", async platformId => {
+    const session = fakeSession([]);
+    const cookies = vi.spyOn(session.cookies, "get");
+    const probe = vi.fn(async () => ({ status: 200, text: JSON.stringify({ code: 0, status_code: 0, result: 1, data: { isLogin: true } }) }));
+    const input = { platformId, session, currentUrl: getPlatform(platformId).routes.home, previousStatus: "online" as const,
+      now: 600000, probe, evidence: { kind: "online" as const, key: "creator-self", sequence: 1, observedAt: 600000, reason: "creator signed in" } };
+    expect(await detectLoginState(input)).toMatchObject({ status: "unknown", unconfirmed: true });
+    expect(await detectLoginState({ ...input, homepageConfirmation: { kind: "online", observedAt: 599999 } }))
+      .toMatchObject({ status: "online", unconfirmed: true });
+    expect(await detectLoginState({ ...input, homepageConfirmation: { kind: "online", observedAt: 300000 } }))
+      .toMatchObject({ status: "unknown", unconfirmed: true });
+    expect(await detectLoginState({ ...input, homepageConfirmation: { kind: "offline", observedAt: 599999 } }))
+      .toMatchObject({ status: "offline", unconfirmed: true });
+    expect(cookies).not.toHaveBeenCalled();
+    expect(probe).not.toHaveBeenCalled();
   });
 
   it.each([

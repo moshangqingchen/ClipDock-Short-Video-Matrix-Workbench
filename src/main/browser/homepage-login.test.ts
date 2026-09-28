@@ -324,6 +324,22 @@ describe("homepage current-account avatar extraction", () => {
 });
 
 describe("homepage current-account login detection", () => {
+  const guestSidebar = '<div class="workbench"><main><div class="wb-left"><div class="sidebar"><div class="login-card"><div>登录即可享受</div><div>更懂你的优质内容</div><div>点赞评论收藏</div><div>更好交流互动</div><button>立即登录</button></div></div></div></main></div>';
+  it("detects the visible Kuaishou guest sidebar even when its stale account store says online", () => {
+    expect(read("kuaishou", guestSidebar, { __NUXT__: { state: { user: { isLogin: true, userInfo: { userId: "cached" } } } } }))
+      .toMatchObject({ kind: "offline", source: "homepage" });
+  });
+  it.each([
+    guestSidebar.replace('class="wb-left"', 'class="wb-right"'),
+    '<article>' + guestSidebar + '</article>',
+    '<div hidden>' + guestSidebar + '</div>',
+    guestSidebar + guestSidebar,
+  ])("does not infer Kuaishou logout from a feed, hidden or ambiguous sidebar", body => {
+    expect(read("kuaishou", body).kind).toBe("unconfirmed");
+  });
+  it("waits for Kuaishou guest sidebar hydration", () => {
+    expect(read("kuaishou", guestSidebar, {}, { loading: true }).kind).toBe("unconfirmed");
+  });
   // The live Douyin Jingxuan top bar links the signed-in avatar to /user/self.
   // Its sidebar exposes the same route to guests, so the link alone is insufficient.
   const douyinSelfAvatar = '<a href="/user/self"><span style="background-image:url(https://p3.douyinpic.com/current-avatar.jpg)"></span></a>';

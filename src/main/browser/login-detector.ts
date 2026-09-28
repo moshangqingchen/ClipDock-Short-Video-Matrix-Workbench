@@ -12,7 +12,7 @@ import { gatedSessionFetch } from "@main/network/gated-session-fetch";
 import { gatedSessionProbe } from "@main/network/gated-session-probe";
 import { isNetworkDormantError } from "@main/network/business-access";
 import { parseIdentityResponse, type IdentityEvidence } from "./identity-evidence";
-import { isHomepageContext, type HomepageLoginVerdict } from "./homepage-login";
+import { HOMEPAGE_CONFIRMATION_TTL_MS, requiresHomepageLogin, isHomepageContext, type HomepageLoginVerdict } from "./homepage-login";
 
 export interface ProbeResponse {
   status: number;
@@ -46,6 +46,8 @@ export interface DetectionInput {
   evidence?: IdentityEvidence | null;
   /** Read-only evidence from the currently loaded consumer homepage. */
   homepage?: HomepageLoginVerdict | null;
+  /** Main-process memory only; never restored from stored account status or creator identity. */
+  homepageConfirmation?: { kind: "online" | "offline"; observedAt: number } | null;
 }
 
 export interface DetectionResult {
@@ -221,6 +223,32 @@ async function runProbe(input: DetectionInput, platformProbeFromMain: boolean): 
  * confirm a login even when our expected cookie names have changed.
  */
 export async function detectLoginState(input: DetectionInput): Promise<DetectionResult> {
+  if (!requiresHomepageLogin(input.platformId)) return detectCreatorLoginState(input);
+  const url = input.currentUrl ?? "";
+  const base = { sessionCookiesPresent: false, source: "homepage" as const };
+  if (url && isVerificationUrl(input.platformId, url))
+    return { ...base, status: "needs_verification", message: "平台要求完成安全验证" };
+  if (input.lastError)
+    return { ...base, status: "network_error", message: "账号页面加载失败，等待主页重新确认登录" };
+  if (isHomepageContext(input.platformId, url)) {
+    const homepage = input.loading ? null : input.homepage;
+    if (homepage?.source === "homepage" && (homepage.kind === "online" || homepage.kind === "offline"))
+      return { ...base, status: homepage.kind, message: homepage.reason,
+        ...(homepage.kind === "online" && typeof homepage.avatarUrl === "string" ? { avatarUrl: homepage.avatarUrl } : {}) };
+    return { ...base, status: input.previousStatus === "offline" ? "offline" : "unknown", unconfirmed: true,
+      message: homepage?.reason || "等待主页加载并确认登录状态" };
+  }
+  const confirmation = input.homepageConfirmation;
+  const age = (input.now ?? Date.now()) - (confirmation?.observedAt ?? -Infinity);
+  if (confirmation && age >= 0 && age < HOMEPAGE_CONFIRMATION_TTL_MS)
+    return { ...base, status: confirmation.kind, unconfirmed: true,
+      message: "沿用本次会话最近的主页登录结论；管理后台不用于确认主页登录" };
+  return { ...base, status: input.previousStatus === "offline" ? "offline" : "unknown", unconfirmed: true,
+    message: "主页登录尚未确认，请打开主页复核；管理后台登录不能替代主页登录" };
+}
+
+/** Creator-session diagnostics only. These responses cannot authorize a public homepage account. */
+export async function detectCreatorLoginState(input: DetectionInput): Promise<DetectionResult> {
   const now = input.now ?? Date.now();
   const platform = getPlatform(input.platformId);
   const url = input.currentUrl ?? "";

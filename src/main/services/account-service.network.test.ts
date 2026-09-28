@@ -77,7 +77,7 @@ describe("Channels recovery and failed-page authentication", () => {
     await vi.advanceTimersByTimeAsync(4999);
     expect(f.viewPool.navigate).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
-    expect(f.viewPool.navigate).toHaveBeenCalledExactlyOnceWith(f.account.id, getPlatform("weixin_channels").routes.home);
+    expect(f.viewPool.navigate).toHaveBeenCalledExactlyOnceWith(f.account.id, getPlatform("weixin_channels").routes.home, { background: true });
     expect(f.store.accounts.get(f.account.id)?.status).toBe("online");
     expect(browser.wipe).not.toHaveBeenCalled();
     f.service.resumeNetworkAccount(f.account.id);
@@ -129,7 +129,7 @@ describe("Channels recovery and failed-page authentication", () => {
         observedAt: Date.now(), reason: "平台网页已确认登录身份", subject: "self" });
     });
     const checked = await f.service.checkStatus(f.account.id, { force: true, refreshPage: true });
-    expect(f.viewPool.navigate).toHaveBeenCalledExactlyOnceWith(f.account.id, getPlatform("weixin_channels").routes.home);
+    expect(f.viewPool.navigate).toHaveBeenCalledExactlyOnceWith(f.account.id, getPlatform("weixin_channels").routes.home, { background: true });
     expect(checked).toMatchObject({ status: "online", checkInfo: { state: "confirmed" } });
     expect(f.session.fetch).not.toHaveBeenCalled();
   });
@@ -211,12 +211,13 @@ function fixture(
               value: "synthetic-local-fixture",
               domain: ".bilibili.com",
             }))
+          : platformId === "baijiahao" ? [{ name: "BDUSS", value: "synthetic-local-fixture", domain: ".baidu.com" }]
           : [{ name: "sessionid", value: "synthetic-local-fixture", domain: ".douyin.com" }],
       ),
     },
     fetch: vi.fn<(_url: string, _init?: RequestInit) => Promise<Response>>(async (url) =>
       responseAt(
-        Response.json(platformId === "bilibili" ? { code: 0, data: { isLogin: true } } : { status_code: 0 }),
+        Response.json(platformId === "bilibili" ? { code: 0, data: { isLogin: true } } : platformId === "baijiahao" ? { errno: 0, data: { id: "self" } } : { status_code: 0 }),
         url,
       ),
     ),
@@ -234,6 +235,7 @@ function fixture(
     ensure: vi.fn(),
     navigate: vi.fn(async () => undefined),
     show: vi.fn(),
+    setMessageMode: vi.fn(),
     remove: vi.fn(),
   };
   const notify = vi.fn();
@@ -280,7 +282,7 @@ function fixture(
   };
   uninstallers.push(installBusinessNetwork(network));
   return {
-    account,
+    account: store.accounts.get(account.id)!,
     store,
     service,
     session,
@@ -452,7 +454,7 @@ describe("identity checks and attempt feedback", () => {
     },
   );
 
-  it("keeps the confirmed homepage login and its timestamps when a later observation is unavailable", async () => {
+  it("changes an unconfirmed homepage to unknown without refreshing last-online time", async () => {
     const f = fixture("offline");
     const evaluate = vi.fn()
       .mockResolvedValueOnce({ kind: "online", source: "homepage", reason: "主页已登录" })
@@ -464,29 +466,29 @@ describe("identity checks and attempt feedback", () => {
     const confirmed = await f.service.checkStatus(f.account.id, { force: true });
     vi.setSystemTime(Date.now() + 60_000);
     const unavailable = await f.service.checkStatus(f.account.id, { force: true });
-    expect(authFields(unavailable)).toEqual(authFields(confirmed));
+    expect(unavailable.status).toBe("unknown");
+    expect(unavailable.lastOnlineAt).toBe(confirmed.lastOnlineAt);
     expect(unavailable.checkInfo?.state).toBe("unconfirmed");
     expect(f.session.fetch).not.toHaveBeenCalled();
     expect(f.mediaIntake.avatar).not.toHaveBeenCalled();
   });
 
-  it("rechecks homepage logout before marking offline and handles re-login immediately after cookie activity", async () => {
+  it("marks an explicit homepage logout offline immediately and rechecks after cookie activity", async () => {
     const f = fixture("online");
     const evaluate = vi.fn()
-      .mockResolvedValueOnce({ kind: "offline", source: "homepage", reason: "主页已退出登录" })
       .mockResolvedValueOnce({ kind: "offline", source: "homepage", reason: "主页已退出登录" })
       .mockResolvedValue({ kind: "online", source: "homepage", reason: "主页已登录" });
     f.viewPool.getWebContents.mockReturnValue(Object.assign(new EventEmitter(), {
       isDestroyed: () => false, executeJavaScript: evaluate,
     }) as unknown as WebContents);
     f.viewPool.getState.mockReturnValue({ url: getPlatform("douyin").routes.site, loading: false } as ViewState);
-    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("online");
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("offline");
     await vi.advanceTimersByTimeAsync(3000);
     expect(f.store.accounts.get(f.account.id)?.status).toBe("offline");
     f.service.onActivity(f.account.id, "cookies");
     await vi.advanceTimersByTimeAsync(1200);
     expect(f.store.accounts.get(f.account.id)).toMatchObject({ status: "online", checkInfo: { state: "confirmed" } });
-    expect(evaluate).toHaveBeenCalledTimes(3);
+    expect(evaluate).toHaveBeenCalledTimes(2);
     expect(f.session.fetch).not.toHaveBeenCalled();
   });
 
@@ -514,16 +516,16 @@ describe("identity checks and attempt feedback", () => {
     expect(f.mediaIntake.avatar).not.toHaveBeenCalled();
   });
 
-  it("rechecks one Xiaohongshu 401 without dropping account information, then confirms a second failure", async () => {
-    const f = fixture("online", true, undefined, "xiaohongshu");
+  it("rechecks one Baijiahao 401 without dropping account information, then confirms a second failure", async () => {
+    const f = fixture("online", true, undefined, "baijiahao");
     const saved = f.store.accounts.update(f.account.id, {
       displayName: "保存的昵称", handle: "2623619080", externalId: "saved-uid",
     })!;
-    const probe = vi.fn(async () => ({ status: 401, text: "", url: getPlatform("xiaohongshu").login.probe.url }));
+    const probe = vi.fn(async () => ({ status: 401, text: "", url: getPlatform("baijiahao").login.probe.url }));
     const wc = Object.assign(new EventEmitter(), { isDestroyed: () => false, executeJavaScript: probe });
     f.viewPool.getWebContents.mockReturnValue(wc as unknown as WebContents);
     f.viewPool.getState.mockReturnValue({
-      url: getPlatform("xiaohongshu").routes.home, loading: false, instanceId: 1, navigationId: 1,
+      url: getPlatform("baijiahao").routes.home, loading: false, instanceId: 1, navigationId: 1,
     } as ViewState);
     vi.setSystemTime("2026-09-07T12:10:00.000Z");
     const first = await f.service.checkStatus(f.account.id, { force: true });
@@ -539,16 +541,16 @@ describe("identity checks and attempt feedback", () => {
     expect(f.notify).toHaveBeenCalledOnce();
   });
 
-  it("cancels Xiaohongshu's temporary negative conclusion after a successful recheck", async () => {
-    const f = fixture("online", true, undefined, "xiaohongshu");
-    const url = getPlatform("xiaohongshu").login.probe.url;
+  it("cancels Baijiahao's temporary negative conclusion after a successful recheck", async () => {
+    const f = fixture("online", true, undefined, "baijiahao");
+    const url = getPlatform("baijiahao").login.probe.url;
     const probe = vi.fn()
       .mockResolvedValueOnce({ status: 401, text: "", url })
-      .mockResolvedValueOnce({ status: 200, text: '{"code":0,"data":{"userId":"same-user"}}', url })
+      .mockResolvedValueOnce({ status: 200, text: '{"errno":0,"data":{"userId":"same-user"}}', url })
       .mockResolvedValueOnce({ status: 401, text: "", url });
     const wc = Object.assign(new EventEmitter(), { isDestroyed: () => false, executeJavaScript: probe });
     f.viewPool.getWebContents.mockReturnValue(wc as unknown as WebContents);
-    f.viewPool.getState.mockReturnValue({ url: getPlatform("xiaohongshu").routes.home } as ViewState);
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("baijiahao").routes.home } as ViewState);
     expect((await f.service.checkStatus(f.account.id, { force: true })).checkInfo?.state).toBe("unconfirmed");
     await vi.advanceTimersByTimeAsync(3000);
     expect(f.store.accounts.get(f.account.id)?.checkInfo?.state).toBe("confirmed");
@@ -558,14 +560,14 @@ describe("identity checks and attempt feedback", () => {
   });
 
   it("runs the negative recheck even when a successful probe happened less than 30 seconds ago", async () => {
-    const f = fixture("online", true, undefined, "xiaohongshu");
-    const url = getPlatform("xiaohongshu").login.probe.url;
+    const f = fixture("online", true, undefined, "baijiahao");
+    const url = getPlatform("baijiahao").login.probe.url;
     const probe = vi.fn()
-      .mockResolvedValueOnce({ status: 200, text: '{"code":0,"data":{"userId":"same-user"}}', url })
+      .mockResolvedValueOnce({ status: 200, text: '{"errno":0,"data":{"userId":"same-user"}}', url })
       .mockResolvedValue({ status: 401, text: "", url });
     const wc = Object.assign(new EventEmitter(), { isDestroyed: () => false, executeJavaScript: probe });
     f.viewPool.getWebContents.mockReturnValue(wc as unknown as WebContents);
-    f.viewPool.getState.mockReturnValue({ url: getPlatform("xiaohongshu").routes.home } as ViewState);
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("baijiahao").routes.home } as ViewState);
     expect((await f.service.checkStatus(f.account.id, { force: true })).checkInfo?.state).toBe("confirmed");
     expect((await f.service.checkStatus(f.account.id, { force: true })).checkInfo?.state).toBe("unconfirmed");
     await vi.advanceTimersByTimeAsync(3000);
@@ -595,17 +597,17 @@ describe("identity checks and attempt feedback", () => {
     expect(f.notify).not.toHaveBeenCalled();
   });
 
-  it.each(["member", "api"])("allows Bilibili nav checks from its %s creator/API page context", async (host) => {
+  it.each(["member", "api"])("does not use Bilibili %s identity to authorize its homepage", async (host) => {
     const f = fixture("online", true, undefined, "bilibili");
     const probe = vi.fn(async () => ({ status: 200, text: '{"code":0,"data":{"isLogin":true}}', url: biliProbeUrl }));
     const wc = Object.assign(new EventEmitter(), { isDestroyed: () => false, executeJavaScript: probe });
     f.viewPool.getWebContents.mockReturnValue(wc as unknown as WebContents);
     f.viewPool.getState.mockReturnValue({ url: `https://${host}.bilibili.com/`, loading: false } as ViewState);
-    expect((await f.service.checkStatus(f.account.id, { force: true })).checkInfo?.state).toBe("confirmed");
-    expect(probe).toHaveBeenCalledOnce();
+    expect(await f.service.checkStatus(f.account.id, { force: true })).toMatchObject({ status: "unknown", checkInfo: { state: "unconfirmed" } });
+    expect(probe).not.toHaveBeenCalled();
   });
 
-  it.each(["kuaishou", "weixin_channels"] as const)(
+  it.each(["weixin_channels"] as const)(
     "requires two independent failures, then corrects %s with new successful evidence",
     async (platform) => {
       const f = fixture("online", true, undefined, platform);
@@ -632,9 +634,9 @@ describe("identity checks and attempt feedback", () => {
     },
   );
   it("deduplicates refresh and limits the global pool to two checks", async () => {
-    const f = fixture("online");
-    const two = f.service.create({ platformId: "douyin" }),
-      three = f.service.create({ platformId: "douyin" });
+    const f = fixture("online", true, undefined, "baijiahao");
+    const two = f.service.create({ platformId: "baijiahao" }),
+      three = f.service.create({ platformId: "baijiahao" });
     const blocker = deferred<never[]>();
     f.session.cookies.get.mockImplementation(() => blocker.promise);
     const first = f.service.checkStatus(f.account.id, { force: true });
@@ -650,7 +652,7 @@ describe("identity checks and attempt feedback", () => {
     expect(f.session.fetch).toHaveBeenCalledTimes(3);
   });
   it("reports a network failure without changing confirmed auth timestamps", async () => {
-    const f = fixture("online");
+    const f = fixture("online", true, undefined, "baijiahao");
     f.session.fetch.mockRejectedValueOnce(new Error("synthetic timeout"));
     const checked = await f.service.checkStatus(f.account.id, { force: true });
     expect(authFields(checked)).toEqual(authFields(f.account));
@@ -675,6 +677,90 @@ describe("identity checks and attempt feedback", () => {
   });
 });
 
+describe("homepage login authority lifecycle", () => {
+  function homepage(f: ReturnType<typeof fixture>, kind: "online" | "offline" = "online") {
+    const evaluate = vi.fn(async () => ({ kind: kind as "online" | "offline" | "unconfirmed", source: "homepage", reason: "主页当前登录结论" }));
+    f.viewPool.getState.mockReturnValue({ url: getPlatform(f.account.platformId).routes.site!, loading: false, instanceId: 1, navigationId: 1 } as ViewState);
+    f.viewPool.getWebContents.mockReturnValue(Object.assign(new EventEmitter(), { isDestroyed: () => false, executeJavaScript: evaluate }) as unknown as WebContents);
+    return evaluate;
+  }
+  it.each(["douyin", "kuaishou", "xiaohongshu", "bilibili"] as const)("%s only retains fresh same-process homepage authority while visiting management", async platformId => {
+    const f = fixture("online", true, undefined, platformId);
+    expect(f.service.list()[0].status).toBe("unknown");
+    const evaluate = homepage(f);
+    const confirmed = await f.service.checkStatus(f.account.id, { force: true });
+    expect(confirmed.status).toBe("online");
+    f.viewPool.getState.mockReturnValue({ url: getPlatform(platformId).routes.home, loading: false, instanceId: 1, navigationId: 2 } as ViewState);
+    f.service.onActivity(f.account.id, "navigated");
+    f.viewPool.getIdentityEvidence.mockReturnValue({ kind: "offline", key: "creator-offline", sequence: 1, observedAt: Date.now(), reason: "后台未登录" });
+    const retained = await f.service.checkStatus(f.account.id, { force: true });
+    expect(retained.status).toBe("online");
+    expect(retained.lastOnlineAt).toBe(confirmed.lastOnlineAt);
+    expect(evaluate).toHaveBeenCalledOnce();
+    expect(f.session.fetch).not.toHaveBeenCalled();
+    expect(f.session.cookies.get).not.toHaveBeenCalled();
+    f.service.onActivity(f.account.id, "cookies");
+    expect(f.service.get(f.account.id).status).toBe("unknown");
+    f.viewPool.getIdentityEvidence.mockReturnValue({ kind: "online", key: "creator-online", sequence: 2, observedAt: Date.now(), reason: "后台在线" });
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("unknown");
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it("does not let creator identity overwrite a homepage logout", async () => {
+    const f = fixture("online", true, undefined, "kuaishou");
+    homepage(f, "offline");
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("offline");
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("kuaishou").routes.home, loading: false } as ViewState);
+    f.viewPool.getIdentityEvidence.mockReturnValue({ kind: "online", key: "backend", sequence: 1, observedAt: Date.now(), reason: "后台在线" });
+    f.service.onActivity(f.account.id, "identity");
+    await vi.advanceTimersByTimeAsync(1500);
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("offline");
+  });
+  it("expires homepage authority instead of extending it from creator checks", async () => {
+    const f = fixture("offline");
+    homepage(f);
+    await f.service.checkStatus(f.account.id, { force: true });
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("douyin").routes.home } as ViewState);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(f.service.get(f.account.id).status).toBe("unknown");
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("unknown");
+    expect(f.session.fetch).not.toHaveBeenCalled();
+  });
+  it("does not restore a homepage confirmation across service restart", async () => {
+    const f = fixture("offline");
+    homepage(f);
+    await f.service.checkStatus(f.account.id, { force: true });
+    const lastOnlineAt = f.service.get(f.account.id).lastOnlineAt;
+    f.service.dispose();
+    const next = new AccountService({ store: f.store, viewPool: f.viewPool as unknown as ViewPool, notify: f.notify });
+    services.push(next);
+    expect(next.get(f.account.id)).toMatchObject({ status: "unknown", lastOnlineAt, checkInfo: { state: "unconfirmed" } });
+  });
+  it("does not keep a green status while a new homepage document is pending", async () => {
+    const f = fixture("offline");
+    const evaluate = homepage(f);
+    await f.service.checkStatus(f.account.id, { force: true });
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("douyin").routes.site!, loading: true, instanceId: 1, navigationId: 2 } as ViewState);
+    f.service.onActivity(f.account.id, "navigated");
+    expect(f.service.get(f.account.id).status).toBe("unknown");
+    expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("unknown");
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it("never refreshes a hidden Channels message page but permits passive identity checks", async () => {
+    const f = fixture("online", true, undefined, "weixin_channels");
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("weixin_channels").routes.home, loading: false, visible: false, messageMode: true } as ViewState);
+    f.viewPool.getIdentityEvidence.mockReturnValue({ kind: "online", key: "passive", sequence: 1, observedAt: Date.now(), reason: "已确认登录" });
+    expect((await f.service.checkStatus(f.account.id, { force: true, refreshPage: true })).status).toBe("online");
+    expect(f.viewPool.navigate).not.toHaveBeenCalled();
+    expect(f.session.fetch).not.toHaveBeenCalled();
+  });
+  it("clears message protection on an explicit regular route", async () => {
+    const f = fixture();
+    await f.service.go(f.account.id, "home");
+    expect(f.viewPool.setMessageMode).toHaveBeenCalledWith(f.account.id, false);
+    expect(f.viewPool.setMessageMode.mock.invocationCallOrder[0]).toBeLessThan(f.viewPool.navigate.mock.invocationCallOrder[0]);
+  });
+});
+
 afterEach(() => {
   for (const service of services.splice(0)) service.dispose();
   for (const uninstall of uninstallers.splice(0)) uninstall();
@@ -684,12 +770,17 @@ afterEach(() => {
 });
 
 describe("AccountService network and authentication separation", () => {
-  it("keeps a real Bilibili verdict's timestamps during throttled checks before and after a forced challenge", async () => {
+  it("retains a recent confirmed Bilibili homepage conclusion on management pages without refreshing its timestamps", async () => {
     const f = fixture("online", true, undefined, "bilibili");
+    expect(f.account.status).toBe("unknown");
+    const evaluate = vi.fn(async () => ({ kind: "online", source: "homepage", reason: "主页已登录" }));
+    f.viewPool.getWebContents.mockReturnValue(Object.assign(new EventEmitter(), { isDestroyed: () => false, executeJavaScript: evaluate }) as unknown as WebContents);
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("bilibili").routes.site, loading: false } as ViewState);
     vi.setSystemTime("2026-09-07T12:10:00.000Z");
     const confirmed = await f.service.checkStatus(f.account.id, { skipProbe: false });
     expect(confirmed.status).toBe("online");
-    expect(f.probeResponse).toHaveBeenCalledOnce();
+    expect(evaluate).toHaveBeenCalledOnce();
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("bilibili").routes.home, loading: false } as ViewState);
     const writeStatus = vi.spyOn(f.store.accounts, "updateStatus");
     const online = vi.fn(),
       changed = vi.fn();
@@ -697,18 +788,18 @@ describe("AccountService network and authentication separation", () => {
     f.service.on("account-changed", changed);
     vi.setSystemTime("2026-09-07T12:10:01.000Z");
     expect(await f.service.checkStatus(f.account.id)).toMatchObject(authFields(confirmed)!);
-    expect(f.probeResponse).toHaveBeenCalledOnce();
+    expect(f.probeResponse).not.toHaveBeenCalled();
     vi.setSystemTime("2026-09-07T12:10:02.000Z");
     f.probeResponse.mockResolvedValueOnce(responseAt(Response.json({ code: -352 })));
     expect(await f.service.checkStatus(f.account.id, { skipProbe: false })).toMatchObject(
       authFields(confirmed)!,
     );
-    expect(f.probeResponse).toHaveBeenCalledTimes(2);
+    expect(f.probeResponse).not.toHaveBeenCalled();
     vi.setSystemTime("2026-09-07T12:10:03.000Z");
     expect(await f.service.checkStatus(f.account.id)).toMatchObject(authFields(confirmed)!);
-    f.service.onActivity(f.account.id, "cookies");
+    f.service.onActivity(f.account.id, "navigated");
     await vi.advanceTimersByTimeAsync(1_500);
-    expect(f.probeResponse).toHaveBeenCalledTimes(2);
+    expect(f.probeResponse).not.toHaveBeenCalled();
     expect(f.session.fetch).not.toHaveBeenCalled();
     expect(f.store.accounts.get(f.account.id)).toMatchObject(authFields(confirmed)!);
     expect(writeStatus).not.toHaveBeenCalled();
@@ -722,7 +813,7 @@ describe("AccountService network and authentication separation", () => {
     expect(f.store.collectJobs.list(f.account.id)).toEqual([]);
   });
   it.each(["online", "offline", "unknown"] as const)(
-    "retains Bilibili %s and all authentic timestamps after challenge/empty/malformed nav replies",
+    "does not consult main-process nav responses for a stored Bilibili %s status",
     async (status) => {
       const f = fixture(status, true, undefined, "bilibili");
       const online = vi.fn(),
@@ -744,7 +835,7 @@ describe("AccountService network and authentication separation", () => {
         );
         expect(f.store.accounts.get(f.account.id)).toMatchObject(authFields(f.account)!);
       }
-      expect(f.probeResponse).toHaveBeenCalledTimes(5);
+      expect(f.probeResponse).not.toHaveBeenCalled();
       expect(f.session.fetch).not.toHaveBeenCalled();
       expect(writeStatus).not.toHaveBeenCalled();
       expect(online).not.toHaveBeenCalled();
@@ -760,7 +851,7 @@ describe("AccountService network and authentication separation", () => {
     },
   );
   it.each(["strict", "observe"] as const)(
-    "does not commit Bilibili auth or timestamps from a redirected response outside the configured origin in %s mode",
+    "does not consult redirected main-process Bilibili auth responses in %s mode",
     async (enforcement) => {
       const f = fixture("offline", true, undefined, "bilibili");
       if (enforcement === "observe") {
@@ -788,7 +879,7 @@ describe("AccountService network and authentication separation", () => {
         );
         expect(f.store.accounts.get(f.account.id)).toMatchObject(authFields(f.account)!);
       }
-      expect(f.probeResponse).toHaveBeenCalledTimes(3);
+      expect(f.probeResponse).not.toHaveBeenCalled();
       expect(f.session.fetch).not.toHaveBeenCalled();
       expect(writeStatus).not.toHaveBeenCalled();
       expect(online).not.toHaveBeenCalled();
@@ -804,7 +895,7 @@ describe("AccountService network and authentication separation", () => {
     },
   );
   it("offers a committed profile image only to main-process media while persisting no signed URL", async () => {
-    const f = fixture("online", true);
+    const f = fixture("online", true, undefined, "baijiahao");
     const source = "https://media.example.test/signed-path?signature=synthetic";
     f.fetchProfile.mockResolvedValueOnce({ avatarUrl: source, handle: "safe-handle" });
     const account = await f.service.refreshProfile(f.account.id);
@@ -858,7 +949,7 @@ describe("AccountService network and authentication separation", () => {
   });
 
   it("declares the probe scope before any cookie access and returns old auth when the new scope closes permission", async () => {
-    const f = fixture("online", true);
+    const f = fixture("online", true, undefined, "baijiahao");
     vi.mocked(f.network.prepareOperation!).mockImplementation(() => {
       f.revoke();
       return { ready: Promise.resolve(), contextId: "fixture", scopeVersion: "new-api-scope" };
@@ -889,7 +980,7 @@ describe("AccountService network and authentication separation", () => {
   it("blocks restore-time activity even in observe mode and resumes only after finish without inventing login", async () => {
     const rebuild = deferred<void>();
     const onSessionChange = vi.fn(() => rebuild.promise);
-    const f = fixture("offline", false, onSessionChange);
+    const f = fixture("offline", false, onSessionChange, "baijiahao");
     const observe: BusinessNetworkController = {
       enforcement: "observe",
       check: vi.fn(() => ({ allowed: false, reason: "CHECKING" })),
@@ -941,7 +1032,7 @@ describe("AccountService network and authentication separation", () => {
   it.each<AccountStatus>(["unknown", "online", "offline", "needs_verification", "expiring", "network_error"])(
     "preserves %s and its true check timestamps while dormant, with no session/probe/profile work",
     async (status) => {
-      const f = fixture(status, false);
+      const f = fixture(status, false, undefined, "baijiahao");
       const online = vi.fn();
       const changed = vi.fn();
       f.service.on("account-online", online);
@@ -984,11 +1075,11 @@ describe("AccountService network and authentication separation", () => {
   );
 
   it("uses the unified session factory and real login detector when a no-view probe is allowed", async () => {
-    const f = fixture();
+    const f = fixture("offline", true, undefined, "baijiahao");
     const online = vi.fn();
     f.service.on("account-online", online);
     const result = await f.service.checkStatus(f.account.id);
-    expect(browser.configure).toHaveBeenCalledWith(f.account.id, "douyin");
+    expect(browser.configure).toHaveBeenCalledWith(f.account.id, "baijiahao");
     expect(f.session.fetch).toHaveBeenCalledOnce();
     expect(result.status).toBe("online");
     expect(f.store.accounts.get(f.account.id)?.status).toBe("online");
@@ -998,7 +1089,7 @@ describe("AccountService network and authentication separation", () => {
   it.each(["account suspension", "revocation followed by a new allowed generation", "service disposal"])(
     "ignores a late successful check after %s without announcing login or writing status",
     async (transition) => {
-      const f = fixture();
+      const f = fixture("offline", true, undefined, "baijiahao");
       const response = deferred<Response>();
       const requested = deferred<void>();
       f.session.fetch.mockImplementation(() => {
@@ -1020,7 +1111,7 @@ describe("AccountService network and authentication separation", () => {
       }
       // Deliberately model a non-cooperative transport returning success after
       // abort; old business callbacks still cannot restore the account.
-      response.resolve(Response.json({ status_code: 0 }));
+      response.resolve(Response.json({ errno: 0, data: { id: "self" } }));
       expect(await pending).toMatchObject(authFields(f.account)!);
       expect(f.store.accounts.get(f.account.id)).toMatchObject(authFields(f.account)!);
       expect(writeStatus).not.toHaveBeenCalled();

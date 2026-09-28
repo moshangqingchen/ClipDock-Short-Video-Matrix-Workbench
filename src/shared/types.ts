@@ -66,6 +66,8 @@ export interface AccountUpdateInput {
 /** Per-account browser view runtime state, mirrored to the renderer. */
 export interface ViewState {
   accountId: string;
+  /** An official message page is being used; background work must preserve it. */
+  messageMode?: boolean;
   lifecycle?: "loading" | "ready" | "sleeping" | "crashed" | "destroyed";
   revision?: number;
   instanceId?: number;

@@ -53,6 +53,7 @@ export const IPC = {
   viewSetBounds: "views:set-bounds",
   viewNavigate: "views:navigate",
   viewGo: "views:go",
+  viewOpenMessages: "views:open-messages",
   viewReload: "views:reload",
   viewBack: "views:back",
   viewForward: "views:forward",

@@ -171,6 +171,10 @@ async function fixture(rows: readonly { platform: CnPlatformId; status?: Account
   } as unknown as ViewPool;
   const notify = vi.fn();
   const accounts = new AccountService({ store, viewPool: pool, notify });
+  // This suite starts from a controlled current-session auth condition, not
+  // a persisted pre-startup verdict (public-site startup authority is tested separately).
+  for (const account of records)
+    store.accounts.updateStatus(account.id, account.status, account.statusMessage, { online: false, sessionExpiresAt: account.sessionExpiresAt });
   const online = vi.fn();
   accounts.on("account-online", online);
   const checkStatus = vi.spyOn(accounts, "checkStatus");
@@ -457,18 +461,14 @@ describe("exclusive network policy across real business services", () => {
       original = f.store.accounts.get(account.id)!;
     await f.allow();
     const view = f.views.get(account.id)!;
-    view.setUrl(getPlatform(account.platformId).routes.home);
+    view.setUrl(getPlatform(account.platformId).routes.site!);
     const response = deferred<unknown>();
     view.wc.executeJavaScript.mockReturnValueOnce(response.promise);
     const checking = f.accounts.checkStatus(account.id);
     await settle();
     expect(view.wc.executeJavaScript).toHaveBeenCalledOnce();
     await f.proxyOn();
-    response.resolve({
-      status: 200,
-      text: '{"code":0,"data":{"isLogin":true}}',
-      url: getPlatform("bilibili").login.probe.url,
-    });
+    response.resolve({ kind: "online", source: "homepage", reason: "主页当前账号已登录" });
     await checking;
     await vi.advanceTimersByTimeAsync(2_000);
     expect(f.store.accounts.get(account.id)).toMatchObject({

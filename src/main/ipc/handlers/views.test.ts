@@ -18,7 +18,7 @@ function fixture(target: string | null) {
     ) => handlers.set(channel, (event, value) => fn(event, schema.parse(value))),
   };
   const accounts = { get: vi.fn(() => ({ id, platformId: "bilibili" })), prepareNetworkOperation: vi.fn(), showView: vi.fn() };
-  const pool = { historyTarget: vi.fn(() => target), back: vi.fn(), forward: vi.fn() };
+  const pool = { historyTarget: vi.fn(() => target), back: vi.fn(), forward: vi.fn(), setMessageMode: vi.fn() };
   registerViewHandlers(
     ipc as unknown as IpcRegistrar,
     pool as unknown as ViewPool,

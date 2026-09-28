@@ -916,6 +916,40 @@ async function verifyDomesticOptimization() {
   console.log('domestic optimization smoke: 960/1120/1440/1920 px; six packaged logos; 52/40 px hierarchy; search/collapse; IPC check feedback and deduplication');
 }
 
+async function verifyMessagesWorkspace() {
+  const result = await evaluate(`(async () => {
+    const accounts = await window.workbench.accounts.list();
+    const current = accounts.find(a => a.platformId === 'weixin_channels' && a.displayName.startsWith('层级测试'));
+    const hidden = accounts.find(a => a.platformId === 'bilibili' && a.displayName.startsWith('层级测试'));
+    let invalid = false, hiddenRejected = false;
+    try { await window.workbench.views.openMessages('invalid-account'); } catch { invalid = true; }
+    try { await window.workbench.views.openMessages(hidden.id); } catch { hiddenRejected = true; }
+    const opened = await window.workbench.views.openMessages(current.id);
+    const state = await window.workbench.views.state(current.id);
+    return { id:current.id, invalid, hiddenRejected, mode:state.messageMode, guidance:typeof opened.guidance === 'string' };
+  })()`);
+  if (!result.invalid || !result.hiddenRejected || !result.mode || !result.guidance) throw new Error('message IPC ownership failed');
+  await sleep(200);
+  for (const width of [960,1440]) {
+    await command('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
+    await sleep(200);
+    const layout = await evaluate(`(() => {
+      const banner=document.querySelector('section[aria-label="消息与对话"]');
+      const host=document.querySelector('[data-view-host]');
+      const r=banner?.getBoundingClientRect(), h=host?.getBoundingClientRect();
+      return { separated:r?.height>0 && r.bottom<=h?.top, overflow:document.documentElement.scrollWidth>innerWidth, height:h?.height };
+    })()`);
+    if (!layout.separated || layout.overflow || layout.height<100) throw new Error('message workspace geometry failed: '+JSON.stringify(layout));
+    const shot=await command('Page.captureScreenshot',{format:'png'});
+    fs.mkdirSync(path.resolve('output/messages-upgrade'),{recursive:true});
+    fs.writeFileSync(path.resolve('output/messages-upgrade/workspace-'+width+'.png'),Buffer.from(shot.data,'base64'));
+  }
+  await evaluate(`window.workbench.views.go(${JSON.stringify(result.id)},'home')`);
+  if (await evaluate(`window.workbench.views.state(${JSON.stringify(result.id)}).then(s=>s.messageMode)`)) throw new Error('explicit navigation did not release message mode');
+  await command('Emulation.clearDeviceMetricsOverride');
+  console.log('messages smoke: validated account ownership, official-page bridge, 960/1440 layout and explicit release; no real messages sent');
+}
+
 async function verifyCollectionQuality() {
   const result = await evaluate(`(async () => {
     const all = await window.workbench.accounts.list();
@@ -1042,6 +1076,7 @@ try {
       await verifyGlobalAccounts(accounts);
       const globalSecretChecked = await verifyGlobalAppConfiguration(credentials.checked);
       await verifyDomesticOptimization();
+      await verifyMessagesWorkspace();
       await verifyCollectionQuality();
       if (process.argv.includes("--require-domestic-direct")) {
         const deadline = Date.now() + 60000;

@@ -65,7 +65,7 @@ function setup(platformId: PlatformId = "douyin", needsMediaRefresh?: (accountId
     isDestroyed: () => false,
     isLoading: () => false,
   });
-  const entry = { visible: false, view: { webContents: wc } };
+  const entry = { visible: false, messageMode: false, view: { webContents: wc } };
   const ensure = vi.fn(() => entry);
   const setPage = (next: string, visible = entry.visible) => {
     url = next;
@@ -88,7 +88,7 @@ function setup(platformId: PlatformId = "douyin", needsMediaRefresh?: (accountId
     checkStatus,
     prepareNetworkOperation,
   } as unknown as AccountService;
-  const getState = vi.fn(() => ({ instanceId: 1, navigationId, url, visible: entry.visible }));
+  const getState = vi.fn(() => ({ instanceId: 1, navigationId, url, visible: entry.visible, messageMode: entry.messageMode }));
   const getIdentityEvidence = vi.fn(() => null as { key: string; kind?: "online"; subject?: string; profile?: { externalId: string } } | null);
   const pool = { ensure, navigate, getState, getIdentityEvidence } as unknown as ViewPool;
   const collectors = {
@@ -137,6 +137,7 @@ function setup(platformId: PlatformId = "douyin", needsMediaRefresh?: (accountId
     getState,
     getIdentityEvidence,
     pool,
+    setMessageMode: (enabled: boolean) => { entry.messageMode = enabled; },
   };
 }
 const revoke = () => {
@@ -146,6 +147,115 @@ const revoke = () => {
 };
 
 describe("CollectScheduler network queue", () => {
+  it.each(["manual", "scheduled", "login", "keepalive"] as const)(
+    "preserves visible and hidden message pages before declaring a %s collection scope", async trigger => {
+      allowed = true;
+      const s = setup("weixin_channels");
+      s.setPage(getPlatform("weixin_channels").routes.home, true);
+      s.setMessageMode(true);
+      for (const visible of [true, false]) {
+        s.setPage(getPlatform("weixin_channels").routes.home, visible);
+        const job = scheduler.enqueue(s.account.id, trigger);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(store.collectJobs.get(job.id)).toMatchObject({ state: "done", message: expect.stringContaining("消息") });
+      }
+      expect(s.prepareNetworkOperation).not.toHaveBeenCalled();
+      expect(s.ensure).not.toHaveBeenCalled();
+      expect(s.navigate).not.toHaveBeenCalled();
+      expect(s.collect).not.toHaveBeenCalled();
+      expect(s.checkStatus).not.toHaveBeenCalled();
+      expect(store.metrics.listRuns(s.account.id)).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      expect(store.metrics.listRuns(s.account.id)).toHaveLength(2); // No periodic skip/keepalive loop.
+    },
+  );
+
+  it("rechecks queued work after the account enters message mode", async () => {
+    allowed = true;
+    const s = setup();
+    const job = scheduler.enqueue(s.account.id, "manual");
+    s.setMessageMode(true);
+    s.prepareNetworkOperation.mockClear();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(s.prepareNetworkOperation).not.toHaveBeenCalled();
+    expect(s.navigate).not.toHaveBeenCalled();
+    expect(s.collect).not.toHaveBeenCalled();
+    expect(store.collectJobs.get(job.id)?.state).toBe("done");
+    expect(store.metrics.listRuns(s.account.id)[0]).toMatchObject({ status: "skipped", message: expect.stringContaining("消息") });
+  });
+
+  it("does not refresh a stale same-origin console when message mode starts during its idle wait", async () => {
+    allowed = true;
+    const s = setup("weixin_channels");
+    s.setPage(getPlatform("weixin_channels").routes.home, true);
+    const job = scheduler.enqueue(s.account.id, "manual");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.ensure).toHaveBeenCalledOnce();
+    s.setMessageMode(true);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(s.navigate).not.toHaveBeenCalled();
+    expect(s.collect).not.toHaveBeenCalled();
+    expect(store.collectJobs.get(job.id)?.state).toBe("done");
+    expect(store.metrics.listRuns(s.account.id)[0].status).toBe("skipped");
+  });
+
+  it("drops an in-flight collection response after message mode starts, even before the message URL changes", async () => {
+    allowed = true;
+    const s = setup();
+    s.setPage(getPlatform("douyin").routes.home, false);
+    const job = scheduler.enqueue(s.account.id, "manual");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(s.collect).toHaveBeenCalledOnce();
+    s.setMessageMode(true);
+    s.result.resolve(s.payload);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.collectJobs.get(job.id)?.state).toBe("done");
+    expect(store.metrics.listRuns(s.account.id)[0]).toMatchObject({ status: "skipped", metricsWritten: 0, worksWritten: 0 });
+    expect(store.metrics.listSnapshots(s.account.id)).toEqual([]);
+    expect(s.update).not.toHaveBeenCalled();
+    expect(s.mediaIntake.covers).not.toHaveBeenCalled();
+    expect(s.onMetrics).not.toHaveBeenCalled();
+    s.setMessageMode(false);
+    const resumed = scheduler.enqueue(s.account.id, "manual");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(store.collectJobs.get(resumed.id)?.state).toBe("done");
+    expect(store.metrics.listSnapshots(s.account.id)).toHaveLength(1);
+  });
+
+  it("records an in-flight keepalive as skipped when messages take ownership before the result returns", async () => {
+    allowed = true;
+    const s = setup("weixin_channels");
+    const checked = deferred<ReturnType<typeof store.accounts.get>>();
+    s.checkStatus.mockImplementation(async () => (await checked.promise)!);
+    const job = scheduler.enqueue(s.account.id, "keepalive");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.checkStatus).toHaveBeenCalledOnce();
+    s.setMessageMode(true);
+    checked.resolve({ ...s.account, checkInfo: { state: "confirmed", reason: "fixture", attemptedAt: new Date().toISOString() } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.collectJobs.get(job.id)?.state).toBe("done");
+    expect(store.metrics.lastKeepaliveRun(s.account.id)?.status).toBe("skipped");
+  });
+
+  it("retains completed history pages and stops before the next request after entering messages", async () => {
+    allowed = true;
+    const s = setup();
+    s.setPage(getPlatform("douyin").routes.home, false);
+    s.collect.mockResolvedValue({ ...s.payload,
+      works: [makeWork(s.account, "first", { likes: 3 }, new Date().toISOString())],
+      page: { nextPage: 2, nextCursor: "next", hasMore: true },
+    });
+    const job = scheduler.enqueue(s.account.id, "manual", "history");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(store.metrics.listWorks(s.account.id)).toHaveLength(1);
+    s.setMessageMode(true);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(s.collect).toHaveBeenCalledOnce();
+    expect(store.metrics.listWorks(s.account.id)).toHaveLength(1);
+    expect(store.collectJobs.get(job.id)).toMatchObject({ state: "done", progress: { pagesDone: 1, cursor: "next", complete: false } });
+    expect(store.metrics.listRuns(s.account.id)[0]).toMatchObject({ status: "skipped", worksWritten: 1 });
+  });
+
   it.each(CN_PLATFORM_IDS)("defers automatic collection while editing or uploading on %s", async (platform) => {
     allowed = true;
     const s = setup(platform); s.setPage(getPlatform(platform).routes.upload, true);
@@ -417,7 +527,7 @@ describe("CollectScheduler network queue", () => {
     });
     const job=scheduler.enqueue(s.account.id,"manual");
     await vi.advanceTimersByTimeAsync(2000);
-    expect(s.navigate).toHaveBeenCalledExactlyOnceWith(s.account.id,address);
+    expect(s.navigate).toHaveBeenCalledExactlyOnceWith(s.account.id,address, { background: true });
     expect(s.collect).toHaveBeenCalledWith(expect.objectContaining({identityProfile:{externalId:"self"}}));
     s.result.resolve(s.payload);await vi.advanceTimersByTimeAsync(0);
     expect(store.collectJobs.get(job.id)?.state).toBe("done");
@@ -552,7 +662,7 @@ describe("CollectScheduler network queue", () => {
     s.setPage(getPlatform("xiaohongshu").routes.site!, false);
     const job = scheduler.enqueue(s.account.id, "scheduled");
     await vi.advanceTimersByTimeAsync(1000);
-    expect(s.navigate).toHaveBeenCalledExactlyOnceWith(s.account.id, getPlatform("xiaohongshu").routes.home);
+    expect(s.navigate).toHaveBeenCalledExactlyOnceWith(s.account.id, getPlatform("xiaohongshu").routes.home, { background: true });
     expect(s.collect).toHaveBeenCalledOnce();
     s.result.resolve(s.payload);
     await vi.advanceTimersByTimeAsync(0);

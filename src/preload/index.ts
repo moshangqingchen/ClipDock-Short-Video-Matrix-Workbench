@@ -349,6 +349,7 @@ const api: WorkbenchApi = {
     refreshProfile: (id) => invoke(IPC.accountRefreshProfile, id),
   },
   views: {
+    openMessages: (id) => invoke(IPC.viewOpenMessages, id),
     show: (id, bounds, enterHomepage) => invoke(IPC.viewShow, id, bounds, enterHomepage),
     hide: (id) => invoke(IPC.viewHide, id),
     hideAll: () => invoke(IPC.viewHideAll),

@@ -150,6 +150,8 @@ export interface WorkbenchApi {
     refreshProfile(id: string): Promise<AccountDto<MediaProjectionMode>>;
   };
   views: {
+    /** Opens this account's official inbox. Never reads or sends message content through IPC. */
+    openMessages(id: string): Promise<{ opened: boolean; guidance: string }>;
     show(id: string, bounds: ViewBounds, enterHomepage?: boolean): Promise<ViewState>;
     hide(id: string): Promise<void>;
     hideAll(): Promise<void>;

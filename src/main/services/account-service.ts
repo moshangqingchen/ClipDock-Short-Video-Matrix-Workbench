@@ -14,7 +14,7 @@ import type { ToastEvent } from "@shared/ipc";
 import type { Store } from "@main/db";
 import { configureAccountSession, wipeAccountSession } from "@main/browser/account-session";
 import { buildInPageProbeScript, detectLoginState, type ProbeResponse } from "@main/browser/login-detector";
-import { buildHomepageLoginScript, isHomepageContext, type HomepageLoginVerdict } from "@main/browser/homepage-login";
+import { buildHomepageLoginScript, HOMEPAGE_CONFIRMATION_TTL_MS, requiresHomepageLogin, isHomepageContext, type HomepageLoginVerdict } from "@main/browser/homepage-login";
 import type { ViewPool } from "@main/browser/view-pool";
 import { evaluateWithLease } from "@main/network/page-evaluation";
 import {
@@ -87,10 +87,17 @@ export class AccountService extends EventEmitter {
   private readonly recoveryPending = new Set<string>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly recoveryAttemptAt = new Map<string, number>();
+  private readonly homepageConfirmations = new Map<string, { kind: "online" | "offline"; observedAt: number }>();
+  private readonly homepageExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(private readonly options: AccountServiceOptions) {
     super();
     for (const account of options.store.accounts.list()) {
+      if (requiresHomepageLogin(account.platformId) && (account.status === "online" || account.status === "expiring")) {
+        options.store.accounts.updateStatus(account.id, "unknown", "等待本次会话的主页确认登录", { online: false });
+        options.store.accounts.updateCheckInfo(account.id, { state: "unconfirmed",
+          reason: "重启后需要重新确认主页登录；后台历史状态不能替代", attemptedAt: new Date().toISOString() });
+      }
       if (account.platformId === "weixin_channels" && account.lastOnlineAt)
         this.recoveryPending.add(account.id);
       if (account.checkInfo?.state === "checking")
@@ -174,6 +181,7 @@ export class AccountService extends EventEmitter {
   /** Revoke queued and in-flight work before destructive session or backup changes. */
   async prepareSessionChange(accountId: string, kind: "delete" | "reset" | "restore"): Promise<void> {
     this.sessionChanges.add(accountId);
+    this.invalidateHomepageConfirmation(accountId, "登录环境已变化，等待主页重新确认");
     this.suspendNetworkAccount(accountId);
     await this.options.onSessionChange?.(accountId, kind);
   }
@@ -241,6 +249,7 @@ export class AccountService extends EventEmitter {
     );
     assertBusinessNetwork(id, url);
     this.options.viewPool.ensure({ id: account.id, platformId: account.platformId }, { navigate: false });
+    this.options.viewPool.setMessageMode?.(id, false);
     await this.options.viewPool.navigate(id, url);
   }
 
@@ -269,7 +278,10 @@ export class AccountService extends EventEmitter {
     if (!account) return;
     const homepage = isHomepageContext(account.platformId, this.options.viewPool.getState(accountId)?.url ?? "");
     // Creator identity responses do not describe a consumer homepage session.
-    if (reason === "identity" && homepage) return;
+    if (reason === "identity" && requiresHomepageLogin(account.platformId)) return;
+    if (requiresHomepageLogin(account.platformId) && (reason === "cookies" || reason === "navigated" && homepage))
+      this.invalidateHomepageConfirmation(accountId, reason === "cookies"
+        ? "会话 Cookie 已变化，等待主页重新确认登录" : "主页已导航，等待当前页面确认登录");
     if (reason !== "identity")
       this.pageActivitySequence.set(accountId, (this.pageActivitySequence.get(accountId) ?? 0) + 1);
     this.lastAttemptAt.delete(accountId);
@@ -375,12 +387,45 @@ export class AccountService extends EventEmitter {
     return account;
   }
 
+  /** Public-site authority is short-lived process memory, never creator status or persisted metadata. */
+  private invalidateHomepageConfirmation(accountId: string, reason: string): void {
+    this.homepageConfirmations.delete(accountId);
+    const timer = this.homepageExpiryTimers.get(accountId);
+    if (timer) clearTimeout(timer);
+    this.homepageExpiryTimers.delete(accountId);
+    const account = this.options.store.accounts.get(accountId);
+    if (account && requiresHomepageLogin(account.platformId) && (account.status === "online" || account.status === "expiring")) {
+      this.options.store.accounts.updateStatus(accountId, "unknown", reason, { online: false });
+      this.recordCheck(accountId, "unconfirmed", reason);
+    }
+  }
+
+  private rememberHomepageConfirmation(accountId: string, kind: "online" | "offline"): void {
+    const oldTimer = this.homepageExpiryTimers.get(accountId);
+    if (oldTimer) clearTimeout(oldTimer);
+    const confirmation = { kind, observedAt: Date.now() };
+    this.homepageConfirmations.set(accountId, confirmation);
+    const timer = setTimeout(() => {
+      if (this.disposed || this.homepageConfirmations.get(accountId) !== confirmation) return;
+      this.invalidateHomepageConfirmation(accountId, "主页登录确认已到复核时间，请在主页重新确认");
+      this.lastAttemptAt.delete(accountId);
+      const account = this.options.store.accounts.get(accountId);
+      if (account && isHomepageContext(account.platformId, this.options.viewPool.getState(accountId)?.url ?? ""))
+        this.scheduleCheck(accountId, 0);
+    }, HOMEPAGE_CONFIRMATION_TTL_MS);
+    timer.unref?.();
+    this.homepageExpiryTimers.set(accountId, timer);
+  }
+
   private prepareCheckNetwork(accountId: string, platformId: PlatformId): void {
-    const currentUrl = this.options.viewPool.getState(accountId)?.url;
+    const page = this.options.viewPool.getState(accountId);
+    const currentUrl = page?.url;
     // A read-only homepage check reuses its existing page-origin scope. The
     // creator probe's scope is unrelated and must not pause this observation.
-    if (currentUrl && isHomepageContext(platformId, currentUrl))
+    if (currentUrl && (page?.messageMode || requiresHomepageLogin(platformId)))
       this.prepareNetworkOperation(accountId, "view-navigate", currentUrl);
+    else if (requiresHomepageLogin(platformId))
+      this.prepareNetworkOperation(accountId, "view-navigate", platformEntryUrl(platformId));
     else this.prepareNetworkOperation(accountId, "check-status");
   }
 
@@ -422,6 +467,7 @@ export class AccountService extends EventEmitter {
       const viewState = this.options.viewPool.getState(accountId);
       const pageActivity = this.pageActivitySequence.get(accountId) ?? 0;
       const homepageContext = isHomepageContext(account.platformId, viewState?.url ?? "");
+      const homepageRequired = requiresHomepageLogin(account.platformId);
       const startingEvidence = this.options.viewPool.getIdentityEvidence?.(accountId);
       const pooled = this.options.viewPool.getSession(accountId)?.session;
       const ses = pooled ?? configureAccountSession(account.id, account.platformId).session;
@@ -440,11 +486,12 @@ export class AccountService extends EventEmitter {
         loading: viewState?.loading ?? false,
         lastError: viewState?.lastError,
         skipProbe,
-        probe: this.inPageProbe(accountId, account.platformId, viewState),
+        probe: homepageRequired ? undefined : this.inPageProbe(accountId, account.platformId, viewState),
         previousStatus: account.status,
         lastOnlineAt: account.lastOnlineAt,
         evidence: startingEvidence,
         homepage: homepageContext ? await this.homepageLogin(accountId, account.platformId, viewState) : undefined,
+        homepageConfirmation: this.homepageConfirmations.get(accountId),
       });
       operation.assertCurrent();
       if (this.disposed || (this.accountEpoch.get(accountId) ?? 0) !== epoch)
@@ -457,19 +504,31 @@ export class AccountService extends EventEmitter {
         viewState?.navigationId !== currentView?.navigationId ||
         viewState?.url !== currentView?.url ||
         pageActivity !== (this.pageActivitySequence.get(accountId) ?? 0) ||
-        (!homepageContext && currentEvidence?.key !== startingEvidence?.key)
+        (!homepageRequired && currentEvidence?.key !== startingEvidence?.key)
       ) {
         this.activityDuringCheck.add(accountId);
         return this.recordCheck(accountId, "unconfirmed", "页面状态已变化，等待新的身份结果");
       }
-      if (result.unconfirmed) return this.recordCheck(accountId, "unconfirmed", result.message);
-      if (result.status === "network_error")
+      if (result.unconfirmed) {
+        if (homepageRequired && (homepageContext || result.status === "unknown"))
+          this.invalidateHomepageConfirmation(accountId, result.message);
+        if (homepageRequired && result.status === "unknown" && this.get(accountId).status !== "unknown")
+          this.options.store.accounts.updateStatus(accountId, "unknown", result.message, { online: false });
+        return this.recordCheck(accountId, "unconfirmed", result.message);
+      }
+      if (result.status === "network_error") {
+        if (homepageRequired) this.invalidateHomepageConfirmation(accountId, result.message);
         return this.recordCheck(accountId, "network_error", result.message);
+      }
+      if (homepageRequired && (result.status === "online" || result.status === "offline"))
+        this.rememberHomepageConfirmation(accountId, result.status);
+      else if (homepageRequired) this.invalidateHomepageConfirmation(accountId, result.message);
       if (result.evidenceKey && this.consumedEvidence.get(accountId) === result.evidenceKey)
         return this.recordCheck(accountId, "unconfirmed", "本次没有新的身份结果，上次结论保留");
       if (result.evidenceKey) this.consumedEvidence.set(accountId, result.evidenceKey);
       if (
         result.status === "offline" &&
+        result.source !== "homepage" &&
         (healthy || this.negativeEvidence.has(accountId) ||
           account.platformId === "kuaishou" || account.platformId === "weixin_channels")
       ) {
@@ -552,6 +611,7 @@ export class AccountService extends EventEmitter {
 
   private async refreshChannelsPage(account: Account, operation: BusinessOperation, epoch: number): Promise<void> {
     const pool = this.options.viewPool;
+    if (pool.getState(account.id)?.messageMode) return;
     const assertCurrent = () => {
       operation.assertCurrent();
       if (this.disposed || this.sessionChanges.has(account.id) || (this.accountEpoch.get(account.id) ?? 0) !== epoch)
@@ -563,7 +623,7 @@ export class AccountService extends EventEmitter {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        pool.navigate(account.id, getPlatform(account.platformId).routes.home),
+        pool.navigate(account.id, getPlatform(account.platformId).routes.home, { background: true }),
         new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("PAGE_RECHECK_TIMEOUT")), 8000); }),
       ]);
     } finally { if (timeout) clearTimeout(timeout); }
@@ -572,6 +632,7 @@ export class AccountService extends EventEmitter {
       assertCurrent();
       const page = pool.getState(account.id);
       if (!page || page.lastError) throw new Error("PAGE_RECHECK_FAILED");
+      if (page.messageMode) return;
       const evidence = pool.getIdentityEvidence(account.id);
       if (!page.loading && ((evidence && evidence.observedAt >= startedAt) ||
           isLoginUrl(account.platformId, page.url) || isVerificationUrl(account.platformId, page.url))) return;
@@ -589,7 +650,7 @@ export class AccountService extends EventEmitter {
     viewState: ViewState | null,
   ): Promise<HomepageLoginVerdict> {
     const pending: HomepageLoginVerdict = {
-      kind: "unconfirmed", reason: "等待主页加载并确认登录状态，上次登录结论保留", source: "homepage",
+      kind: "unconfirmed", reason: "等待主页加载并确认登录状态", source: "homepage",
     };
     const wc = this.options.viewPool.getWebContents(accountId);
     if (!wc || wc.isDestroyed() || !viewState?.url || viewState.loading) return pending;
@@ -798,12 +859,15 @@ export class AccountService extends EventEmitter {
     for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
     this.recoveryTimers.clear();
     this.recoveryPending.clear();
+    for (const timer of this.homepageExpiryTimers.values()) clearTimeout(timer);
+    this.homepageExpiryTimers.clear();
+    this.homepageConfirmations.clear();
   }
 }
 
 /** Only read-only management routes may be revisited in a hidden Channels view. */
 function canRefreshChannelsPage(page: ViewState | null): boolean {
-  if (page?.visible || page?.loading) return false;
+  if (page?.visible || page?.loading || page?.messageMode) return false;
   if (!page?.url || page.url === "about:blank") return true;
   if (isLoginUrl("weixin_channels", page.url) || isVerificationUrl("weixin_channels", page.url)) return false;
   try {
