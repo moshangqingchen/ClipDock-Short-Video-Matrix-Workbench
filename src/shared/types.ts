@@ -166,19 +166,43 @@ export interface MetricDelta {
   month: number | null;
 }
 
+/** Only actual daily observations; null denotes an unobserved field/day. */
+export interface MetricTrendPoint {
+  date: string;
+  followers: number | null;
+  likes: number | null;
+  plays: number | null;
+  following?: number | null;
+  comments?: number | null;
+  shares?: number | null;
+  favorites?: number | null;
+  works?: number | null;
+  coverage?: Partial<Record<MetricName, number>>;
+}
+
+export interface WorkMetricCoverage {
+  /** Works contributing a value to the collected-work sum, including legacy values. */
+  observed: number;
+  /** Subset whose field provenance is unknown or legacy. */
+  legacy: number;
+  capturedAt: string | null;
+}
+
 export interface AccountMetricsView {
   collectedWorkCount?: number;
   workTotals?: Partial<Record<WorkMetric, number>>;
+  workCoverage?: Partial<Record<WorkMetric, WorkMetricCoverage>>;
   accountId: string;
   platformId: PlatformId;
   capturedAt: string | null;
   metrics: Partial<Record<MetricName, MetricDelta>>;
-  trend: Array<{ date: string; followers: number | null; likes: number | null; plays: number | null }>;
+  trend: MetricTrendPoint[];
   lastRun?: CollectRun | null;
 }
 
 export interface PlatformSummaryView {
   coverage?: Partial<Record<MetricName, number>>;
+  dayCoverage?: Partial<Record<MetricName, number>>;
   platformId: PlatformId;
   accountCount: number;
   onlineCount: number;
@@ -191,18 +215,21 @@ export interface PlatformSummaryView {
     status: AccountStatus;
     metrics: Partial<Record<MetricName, MetricDelta>>;
     capturedAt: string | null;
-    spark: number[];
+    spark: Array<number | null>;
+    lastRun?: CollectRun | null;
   }>;
 }
 
 export interface OverviewView {
+  coverage?: Partial<Record<MetricName, number>>;
+  dayCoverage?: Partial<Record<MetricName, number>>;
   accountCount: number;
   onlineCount: number;
   attentionCount: number;
   totals: Partial<Record<MetricName, number>>;
   dayDelta: Partial<Record<MetricName, number>>;
   platforms: PlatformSummaryView[];
-  trend: Array<{ date: string; followers: number; likes: number; plays: number }>;
+  trend: MetricTrendPoint[];
   attention: Array<{
     accountId: string;
     displayName: string;

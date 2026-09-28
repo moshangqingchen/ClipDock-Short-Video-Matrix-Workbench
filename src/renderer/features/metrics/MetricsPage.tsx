@@ -1,5 +1,5 @@
 import { workMetric } from "@shared/metric-quality";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { PlatformLogo } from "@renderer/components/ui/PlatformLogo";
 import {
   Area,
@@ -14,7 +14,8 @@ import {
 } from "recharts";
 import { ArrowLeft, ArrowUpDown, BarChart3, ExternalLink, RefreshCw } from "lucide-react";
 import { PLATFORMS, PLATFORM_LIST, type PlatformId } from "@shared/platforms";
-import type { AccountMetricsView, MetricDelta, MetricName, PlatformSummaryView, Work } from "@shared/types";
+import type { MetricDelta, MetricName } from "@shared/types";
+import { METRIC_NAMES, WORK_METRICS } from "@shared/types";
 import {
   Avatar,
   Badge,
@@ -42,8 +43,10 @@ import styles from "./metrics.module.css";
 import { showCollectAccepted } from "./collect-feedback";
 import { WorkLink } from "./WorkLink";
 import { BusinessAnalyticsPanel } from "./BusinessAnalyticsPanel";
+import { METRIC_LABELS, RUN_LABELS, originLabel } from "./metric-presentation";
+import { useMetricResource } from "./use-metric-resource";
 
-type SortKey = "followers" | "likes" | "plays" | "comments" | "works" | "dayFollowers";
+type SortKey = MetricName | "dayFollowers";
 type Range = 7 | 30 | 90;
 
 export function MetricsPage() {
@@ -53,6 +56,13 @@ export function MetricsPage() {
   const detailId = useUi((s) => s.metricsAccountId),
     setDetailId = useUi((s) => s.setMetricsAccountId);
   const [range, setRange] = useState<Range>(30);
+  const [collectingAll, setCollectingAll] = useState(false);
+  const collectAll = async () => {
+    setCollectingAll(true);
+    try { showCollectAccepted(await api.metrics.collectNow()); }
+    catch { useToasts.getState().push({ kind: "error", title: "任务受理失败", message: "请稍后重试采集全部平台" }); }
+    finally { setCollectingAll(false); }
+  };
 
   const available = PLATFORM_LIST.filter((p) => accounts.some((a) => a.platformId === p.id));
   const selected =
@@ -73,8 +83,10 @@ export function MetricsPage() {
         <div>
           <span className={layout.eyebrow}>ANALYTICS</span>
           <h1>数据观测</h1>
-          <p>按平台查看各账号的粉丝、获赞、评论、播放及增量。数据来自各账号自身登录会话,只读不写。</p>
+          <p>查看粉丝、关注、获赞、评论、播放、分享、收藏与作品；缺失数据保留为空，采集通过各账号自身登录会话只读进行。</p>
         </div>
+        <div className={styles.detailActions}>
+        <Button icon={RefreshCw} loading={collectingAll} disabled={!accounts.length} onClick={collectAll}>采集全部平台</Button>
         <Tabs
           value={range}
           onChange={setRange}
@@ -84,6 +96,7 @@ export function MetricsPage() {
             { value: 90, label: "90 天" },
           ]}
         />
+        </div>
       </div>
 
       {available.length === 0 ? (
@@ -128,25 +141,12 @@ function PlatformTable({
   range: Range;
   onOpen: (id: string) => void;
 }) {
-  const [data, setData] = useState<PlatformSummaryView | null>(null);
+  const { data, loading, error, retry } = useMetricResource(useCallback(
+    () => api.metrics.platform(platformId, range), [platformId, range]));
+  const accounts = useAccounts(state => state.accounts);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "followers", dir: -1 });
   const [collecting, setCollecting] = useState(false);
   const platform = PLATFORMS[platformId];
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = () =>
-      api.metrics
-        .platform(platformId, range)
-        .then((d) => !cancelled && setData(d))
-        .catch(() => undefined);
-    void load();
-    const off = api.on("metrics-updated", () => void load());
-    return () => {
-      cancelled = true;
-      off();
-    };
-  }, [platformId, range]);
 
   const rows = useMemo(() => {
     if (!data) return [];
@@ -164,7 +164,7 @@ function PlatformTable({
     setCollecting(true);
     try {
       const batches = await Promise.all(
-        (data?.accounts ?? []).map((row) => api.metrics.collectNow(row.accountId)),
+        accounts.filter(account => account.platformId === platformId).map(account => api.metrics.collectNow(account.id)),
       );
       showCollectAccepted(batches.flat());
     } catch (error) {
@@ -185,42 +185,20 @@ function PlatformTable({
 
   return (
     <>
+      {error && <LoadError label="平台数据读取失败" retry={retry} retained={Boolean(data)} />}
       <div className={styles.summaryRow}>
         <SummaryCell
           label={`${platform.shortName}账号`}
           value={data?.accountCount}
           sub={data ? `${data.onlineCount} 在线` : undefined}
-          loading={!data}
+          loading={loading && !data}
         />
-        <SummaryCell
-          label="粉丝合计"
-          sub={data ? `${data.coverage?.followers ?? 0}/${data.accountCount} 个账号有值` : undefined}
-          value={data?.totals.followers}
-          delta={data?.dayDelta.followers}
-          loading={!data}
-        />
-        <SummaryCell
-          label="获赞合计"
-          sub={data ? `${data.coverage?.likes ?? 0}/${data.accountCount} 个账号有值` : undefined}
-          value={data?.totals.likes}
-          delta={data?.dayDelta.likes}
-          loading={!data}
-        />
-        <SummaryCell
-          label="评论合计"
-          sub={data ? `${data.coverage?.comments ?? 0}/${data.accountCount} 个账号有值` : undefined}
-          value={data?.totals.comments}
-          delta={data?.dayDelta.comments}
-          loading={!data}
-        />
-        <SummaryCell
-          label="播放合计"
-          sub={data ? `${data.coverage?.plays ?? 0}/${data.accountCount} 个账号有值` : undefined}
-          value={data?.totals.plays}
-          delta={data?.dayDelta.plays}
-          loading={!data}
-        />
+        {METRIC_NAMES.map(metric => <SummaryCell key={metric} label={`${METRIC_LABELS[metric]}合计`}
+          sub={data ? `${data.coverage?.[metric] ?? 0}/${data.accountCount} 个账号有值` : undefined}
+          value={data?.totals[metric]} delta={data?.dayDelta[metric]} loading={loading && !data} />)}
       </div>
+      {data && !METRIC_NAMES.some(metric => data.totals[metric] != null) &&
+        <p role="status" className={styles.notice}>该平台尚未取得指标。完成账号登录后可点击「采集本平台」；进入账号详情查看采集结果与原因。</p>}
       <Card padded={false} className={styles.tableWrap}>
         <div
           style={{
@@ -236,27 +214,25 @@ function PlatformTable({
             采集本平台
           </Button>
         </div>
+        <p className={styles.scopeNote}>点击账号查看全部 8 项指标、趋势、作品及经营分析；横向滚动可查看全部列。</p>
         <div className={styles.tableScroll}>
           <Table>
             <thead>
               <tr>
                 <th>账号</th>
                 <th>状态</th>
-                {header("粉丝", "followers")}
+                <th>最近采集</th>
+                {METRIC_NAMES.map(metric => header(METRIC_LABELS[metric], metric))}
                 {header("今日涨粉", "dayFollowers")}
-                {header("获赞", "likes")}
-                {header("评论", "comments")}
-                {header("播放", "plays")}
-                {header("作品", "works")}
-                <th>14 天趋势</th>
+                <th>粉丝趋势</th>
                 <th>更新时间</th>
               </tr>
             </thead>
             <tbody>
-              {!data
+              {!data && loading
                 ? Array.from({ length: 3 }).map((_, i) => (
                     <tr key={i}>
-                      <td colSpan={10}>
+                      <td colSpan={14}>
                         <Skeleton height={20} />
                       </td>
                     </tr>
@@ -285,14 +261,14 @@ function PlatformTable({
                           {STATUS_LABEL[row.status]}
                         </Badge>
                       </td>
-                      <MetricTd delta={row.metrics.followers} />
+                      <td className={styles.runCell}>
+                        <strong>{row.lastRun ? RUN_LABELS[row.lastRun.status] : "尚未采集"}</strong>
+                        <small title={row.lastRun?.message ?? undefined}>{row.lastRun?.message || "进入账号查看详情"}</small>
+                      </td>
+                      {METRIC_NAMES.map(metric => <MetricTd key={metric} delta={row.metrics[metric]} />)}
                       <td className={styles.metricCell}>
                         <Delta value={row.metrics.followers?.day} />
                       </td>
-                      <MetricTd delta={row.metrics.likes} />
-                      <MetricTd delta={row.metrics.comments} />
-                      <MetricTd delta={row.metrics.plays} />
-                      <MetricTd delta={row.metrics.works} />
                       <td>
                         <Spark values={row.spark} color={platform.color} />
                       </td>
@@ -303,6 +279,7 @@ function PlatformTable({
                       </td>
                     </tr>
                   ))}
+              {!loading && !rows.length && <tr><td colSpan={14}>{error ? "读取失败，请重试" : "暂无账号明细，请刷新数据或添加账号"}</td></tr>}
             </tbody>
           </Table>
         </div>
@@ -321,15 +298,22 @@ function SortHeader({ label, active, onClick }: { label: string; active: boolean
 
 function MetricTd({ delta }: { delta?: MetricDelta }) {
   return (
-    <td className={styles.metricCell}>
+    <td className={styles.metricCell} title={delta?.current == null ? "尚未取得该指标" : `${originLabel(delta.origin)} · ${formatDateTime(delta.capturedAt)}`}>
       <strong className="num">{formatNumber(delta?.current)}</strong>
       <Delta value={delta?.day} />
     </td>
   );
 }
 
-function Spark({ values, color }: { values: number[]; color: string }) {
-  if (values.length < 2) return <span style={{ color: "var(--fg-subtle)", fontSize: 11 }}>—</span>;
+function LoadError({ label, retry, retained }: { label: string; retry: () => void; retained?: boolean }) {
+  return <div role="alert" className={styles.notice}>
+    <span>{label}。{retained ? "已保留上次读取结果。" : "请重试读取本地数据。"}</span>
+    <Button size="sm" onClick={retry}>重试读取</Button>
+  </div>;
+}
+
+function Spark({ values, color }: { values: Array<number | null>; color: string }) {
+  if (!values.some((value) => value != null)) return <span style={{ color: "var(--fg-subtle)", fontSize: 11 }}>—</span>;
   const data = values.map((v, i) => ({ i, v }));
   return (
     <div className={styles.spark}>
@@ -341,7 +325,7 @@ function Spark({ values, color }: { values: number[]; color: string }) {
             dataKey="v"
             stroke={color}
             strokeWidth={1.8}
-            dot={false}
+            dot={{ r: 1.5 }}
             isAnimationActive={false}
           />
         </LineChart>
@@ -400,29 +384,14 @@ function AccountDetail({
 }) {
   const account = useAccounts((s) => s.accounts.find((a) => a.id === accountId));
   const openAccount = useUi((s) => s.openAccount);
-  const [view, setView] = useState<AccountMetricsView | null>(null);
-  const [works, setWorks] = useState<Work[] | null>(null);
   const [collecting, setCollecting] = useState(false);
   const [pageIndex, setPageIndex] = useState(0);
   const [detailSection, setDetailSection] = useState<"basic" | "business">("basic");
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = () =>
-      Promise.all([api.metrics.account(accountId, range), api.works.list(accountId, 50, pageIndex * 50)])
-        .then(([v, w]) => {
-          if (cancelled) return;
-          setView(v);
-          setWorks(w);
-        })
-        .catch(() => undefined);
-    void load();
-    const off = api.on("metrics-updated", (p) => p.accountId === accountId && void load());
-    return () => {
-      cancelled = true;
-      off();
-    };
-  }, [accountId, range, pageIndex]);
+  const [trendMetric, setTrendMetric] = useState<MetricName>("followers");
+  const { data: view, loading, error, retry } = useMetricResource(useCallback(
+    () => api.metrics.account(accountId, range), [accountId, range]), accountId);
+  const { data: works, loading: worksLoading, error: worksError, retry: retryWorks } = useMetricResource(useCallback(
+    () => api.works.list(accountId, 50, pageIndex * 50), [accountId, pageIndex]), accountId);
 
   const topWorks = useMemo(() => [...(works ?? [])].sort((a, b) => (workMetric(b, "plays") ?? -1) - (workMetric(a, "plays") ?? -1)), [works]);
 
@@ -487,19 +456,27 @@ function AccountDetail({
         </div>
       </div>
 
+      {error && <LoadError label="账号指标读取失败" retry={retry} retained={Boolean(view)} />}
+      {view && <div className={styles.notice} role="status">
+        {view.lastRun ? <><strong>{RUN_LABELS[view.lastRun.status]}</strong>
+          <span>{view.lastRun.message || "本次未提供额外说明"}</span>
+          <span>{formatDateTime(view.lastRun.finishedAt ?? view.lastRun.startedAt)} · 写入 {view.lastRun.metricsWritten} 条指标 / {view.lastRun.worksWritten} 条作品</span>
+        </> : <span>尚无采集记录。完成登录后点击「立即采集」，查看可取得的指标及作品。</span>}
+      </div>}
+
       <div style={{ marginBottom: 16 }}><Tabs value={detailSection} onChange={setDetailSection}
         items={[{ value: "basic", label: "基础数据" }, { value: "business", label: "经营分析" }]} /></div>
       {detailSection === "business" ? <BusinessAnalyticsPanel accountId={accountId} /> : <>
       <div className={styles.detailGrid}>
-        {(["followers", "likes", "plays", "comments"] as const).map((key) => (
+        {METRIC_NAMES.map((key) => (
           <Card key={key} className={styles.detailKpi}>
-            <span>{{ followers: "粉丝", likes: "获赞", plays: "播放", comments: "评论" }[key]}</span>
-            {view ? (
+            <span>{METRIC_LABELS[key]}</span>
+            {view || !loading ? (
               <strong className="num">{formatNumber(m[key]?.current)}</strong>
             ) : (
               <Skeleton height={28} width={100} style={{ marginTop: 6 }} />
             )}
-            <small>{m[key]?.current == null ? "尚未取得该指标" : "更新 " + formatRelative(m[key]?.capturedAt) + " · " + (m[key]?.origin === "official" ? "官方接口" : m[key]?.origin === "page" ? "页面读取" : "历史记录，来源未验证")}</small>
+            <small title={formatDateTime(m[key]?.capturedAt)}>{m[key]?.current == null ? "尚未取得该指标" : "更新 " + formatRelative(m[key]?.capturedAt) + " · " + originLabel(m[key]?.origin)}</small>
             <div className={styles.deltaRow}>
               <span>
                 <b>日</b>
@@ -519,11 +496,14 @@ function AccountDetail({
       </div>
 
       <Card style={{ marginBottom: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
-          <strong style={{ fontSize: "var(--text-md)" }}>粉丝 / 获赞趋势</strong>
+        <div className={styles.chartHead}>
+          <strong>{METRIC_LABELS[trendMetric]}趋势 · 最近 {range} 天</strong>
+          <label>趋势指标 <select value={trendMetric} onChange={event => setTrendMetric(event.target.value as MetricName)}>
+            {METRIC_NAMES.map(metric => <option key={metric} value={metric}>{METRIC_LABELS[metric]}</option>)}
+          </select></label>
         </div>
         <div style={{ height: 240 }}>
-          {view && view.trend.length > 1 ? (
+          {view && view.trend.some(point => point[trendMetric] != null) ? (
             <ResponsiveContainer>
               <AreaChart data={view.trend} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
                 <defs>
@@ -542,17 +522,6 @@ function AccountDetail({
                   minTickGap={28}
                 />
                 <YAxis
-                  yAxisId="f"
-                  tickFormatter={(v: number) => formatNumber(v)}
-                  tick={{ fontSize: 11, fill: "var(--fg-subtle)" }}
-                  axisLine={false}
-                  tickLine={false}
-                  width={48}
-                  domain={["auto", "auto"]}
-                />
-                <YAxis
-                  yAxisId="l"
-                  orientation="right"
                   tickFormatter={(v: number) => formatNumber(v)}
                   tick={{ fontSize: 11, fill: "var(--fg-subtle)" }}
                   axisLine={false}
@@ -567,28 +536,19 @@ function AccountDetail({
                     borderRadius: 10,
                     fontSize: 12,
                   }}
-                  formatter={(value, name) => [
+                  formatter={(value) => [
                     formatNumber(Number(value), false),
-                    name === "followers" ? "粉丝" : "获赞",
+                    METRIC_LABELS[trendMetric],
                   ]}
                 />
                 <Area
-                  yAxisId="f"
                   type="monotone"
-                  dataKey="followers"
+                  dataKey={trendMetric}
                   stroke={platform.color}
                   strokeWidth={2}
                   fill="url(#detF)"
-                  dot={false}
-                  isAnimationActive={false}
-                />
-                <Line
-                  yAxisId="l"
-                  type="monotone"
-                  dataKey="likes"
-                  stroke="#ec4899"
-                  strokeWidth={2}
-                  dot={false}
+                  dot={{ r: 2 }}
+                  connectNulls={false}
                   isAnimationActive={false}
                 />
               </AreaChart>
@@ -603,20 +563,21 @@ function AccountDetail({
                 fontSize: "var(--text-sm)",
               }}
             >
-              累计两次以上采集后显示趋势
+              {loading ? "正在读取趋势…" : `${METRIC_LABELS[trendMetric]}在所选时段暂无有效观测，采集后可在此查看；缺失值不会显示为 0。`}
             </div>
           )}
         </div>
       </Card>
 
       <Card>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+        <div className={styles.chartHead}>
           <strong style={{ fontSize: "var(--text-md)" }}>作品列表 · 当前页按播放排序</strong>
           <span style={{ fontSize: "var(--text-xs)", color: "var(--fg-muted)" }}>
             第 {pageIndex + 1} 页 · 本页 {works?.length ?? 0} 条 / 已采 {view?.collectedWorkCount ?? "—"} 条
           </span>
         </div>
-        {works == null ? (
+        {worksError && <LoadError label="作品列表读取失败" retry={retryWorks} retained={Boolean(works)} />}
+        {works == null && worksLoading ? (
           <Skeleton height={80} />
         ) : topWorks.length === 0 ? (
           <EmptyState
@@ -631,23 +592,30 @@ function AccountDetail({
                 <Cover className={styles.noCover} src={work.coverUrl} />
                 <div style={{ minWidth: 0 }}>
                   <strong title={work.title}>{work.title || "(无标题)"}</strong>
-                  <div className={styles.stats}>
-                    <span className="num">▶ {formatNumber(workMetric(work, "plays"))}</span>
-                    <span className="num">♥ {formatNumber(workMetric(work, "likes"))}</span>
-                    <span className="num">💬 {formatNumber(workMetric(work, "comments"))}</span>
-                    <span className="num">↗ {formatNumber(workMetric(work, "shares"))}</span>
-                    <span>{formatDateTime(work.publishedAt)}</span>
-                  </div>
+                  <dl className={styles.workMetrics}>{WORK_METRICS.map(metric => {
+                    const value = workMetric(work, metric), observation = work.observations?.[metric];
+                    return <div key={metric}><dt>{METRIC_LABELS[metric]}</dt><dd>
+                      <span className="num">{value == null ? "未取得" : formatNumber(value)}</span>
+                      {value != null && <small title={formatDateTime(observation?.capturedAt ?? work.fetchedAt)}>
+                        {originLabel(observation?.origin)} · {formatRelative(observation?.capturedAt ?? work.fetchedAt)}
+                      </small>}
+                    </dd></div>;
+                  })}</dl>
+                  <small>发布 {formatDateTime(work.publishedAt)}</small>
                 </div>
               </WorkLink>
             ))}
           </div>
         )}
-        <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
-          <Button disabled={pageIndex === 0} onClick={() => setPageIndex((n) => n - 1)}>上一页</Button>
-          <Button disabled={(pageIndex + 1) * 50 >= (view?.collectedWorkCount ?? 0)} onClick={() => setPageIndex((n) => n + 1)}>下一页</Button>
-          <span>已采作品播放合计：{formatNumber(view?.workTotals?.plays)}（含历史值，范围以已采作品为准）</span>
+        <div className={styles.pagination}>
+          <Button disabled={pageIndex === 0 || worksLoading} onClick={() => setPageIndex((n) => n - 1)}>上一页</Button>
+          <Button disabled={worksLoading || (pageIndex + 1) * 50 >= (view?.collectedWorkCount ?? 0)} onClick={() => setPageIndex((n) => n + 1)}>下一页</Button>
         </div>
+        <p className={styles.scopeNote}>以下合计仅覆盖已采作品，含历史值，不代表账号全部作品总计。</p>
+        <div className={styles.workTotals}>{WORK_METRICS.map(metric => <div key={metric}>
+          <span>已采作品{METRIC_LABELS[metric]}合计</span><strong>{formatNumber(view?.workTotals?.[metric])}</strong>
+          {view?.workCoverage?.[metric] && <small>{view.workCoverage[metric]!.observed}/{view.collectedWorkCount ?? 0} 条有值，其中 {view.workCoverage[metric]!.legacy} 条来源未验证</small>}
+        </div>)}</div>
       </Card>
       </>}
     </div>

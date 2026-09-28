@@ -31,11 +31,17 @@ export function analyticsPageAllowed(platform: CnPlatformId, url: string): boole
 export function analyticsPageScript(platform: CnPlatformId): string {
   return `(() => {
     const labels = ${JSON.stringify(ANALYTICS_LABELS[platform])};
-    const visible = el => el.getClientRects().length > 0;
-    const leaves = [...document.querySelectorAll('body *')].filter(el => !el.children.length && visible(el));
-    const dates = root => [...new Set((root.innerText || '').match(/20\\d{2}[-/]\\d{1,2}[-/]\\d{1,2}/g) || [])].slice(0, 8).map(s => s.split(/[-/]/).map((n,i) => i ? n.padStart(2,'0') : n).join('-'));
-    const globalDates = [...new Set([...document.querySelectorAll('input')].filter(visible).flatMap(el => (el.value || '').match(/20\\d{2}-\\d{2}-\\d{2}/g) || []))];
+    const visible = el => !el.closest('[hidden],[aria-hidden="true"]') && el.getClientRects().length > 0;
+    const nodes = document.querySelectorAll('body *');
+    // A large page can contain comments or feed history; never scan it without a bound.
+    if (nodes.length > 12000) return { cards: [], groups: [], dates: [], permissionRequired: false };
+    const leaves = [...nodes].filter(el => !el.children.length && visible(el));
+    const dateText = text => [...new Set((text || '').match(/20\\d{2}[-/年]\\d{1,2}[-/月]\\d{1,2}日?/g) || [])].slice(0,8).map(s => s.replace(/日$/, '').split(/[-/年月]/).map((n,i) => i ? n.padStart(2,'0') : n).join('-'));
+    const dates = root => dateText(root.innerText);
+    const globalDates = [...new Set([...document.querySelectorAll('input')].filter(visible).flatMap(el => dateText(el.value)))];
     const explicitDates = leaves.filter(el => /^(统计周期|统计时间|数据周期|数据时间)[:：\\s]/.test(el.textContent.trim())).flatMap(el => dates(el));
+    const allLabels = new Set(Object.values(labels).flat());
+    const comparison = el => /(?:环比|同比|较上|较前|较昨)/.test(el.parentElement?.innerText || '');
     const cards = [], groups = [];
     for (const [metric, names] of Object.entries(labels)) for (const label of names) {
       const matching = leaves.filter(el => el.textContent.trim() === label);
@@ -44,15 +50,22 @@ export function analyticsPageScript(platform: CnPlatformId): string {
       if (metric === 'audience' || metric === 'trafficSources') {
         const scope = el.closest('section,article,[role=region]') || el.parentElement?.parentElement;
         if (!scope) continue;
+        // Never combine adjacent audience/traffic tables under a shared section.
+        if (leaves.some(n => n !== el && scope.contains(n) && allLabels.has(n.textContent.trim()))) continue;
         const entries = [...scope.querySelectorAll('tr,[role=row]')].filter(visible).map(row => {
           const cells = [...row.querySelectorAll('td,[role=cell]')].filter(visible);
           return cells.length === 2 ? { label: cells[0].innerText.trim().slice(0,80), text: cells[1].innerText.trim().slice(0,80) } : null;
         }).filter(Boolean).slice(0,100);
         if (entries.length) groups.push({ dimension: label, entries, dates: dates(scope) });
       } else {
-        const scope = el.parentElement;
-        const values = scope ? [...scope.querySelectorAll('*')].filter(n => n !== el && !n.children.length && visible(n) && /[0-9]/.test(n.textContent) && n.textContent.trim().length <= 80) : [];
-        if (values.length === 1) cards.push({ label, text: values[0].textContent.trim(), dates: dates(scope) });
+        let scope = el.parentElement;
+        for (let depth = 0; scope && depth < 3 && scope !== document.body; depth++, scope = scope.parentElement) {
+          const nearby = [...scope.querySelectorAll('*')].filter(n => !n.children.length && visible(n));
+          if (nearby.some(n => n !== el && allLabels.has(n.textContent.trim()))) break;
+          const values = nearby.filter(n => n !== el && /[0-9]/.test(n.textContent) && n.textContent.trim().length <= 80 && !dateText(n.textContent).length && !comparison(n));
+          if (values.length > 1) break;
+          if (values.length === 1) { cards.push({ label, text: values[0].textContent.trim(), dates: dates(scope) }); break; }
+        }
       }
     }
     return { cards, groups, dates: globalDates.length ? globalDates : [...new Set(explicitDates)],
@@ -77,6 +90,16 @@ export function parseDuration(text: string): number | null {
   if (scalar) return Number(scalar[1]) * (/^(分钟|分|min)$/i.test(scalar[2]) ? 60 : /^(小时|h)$/i.test(scalar[2]) ? 3600 : 1);
   const clock = /^(?:(\d+):)?(\d{1,2}):(\d{2})$/.exec(text.trim());
   return clock && Number(clock[2]) < 60 && Number(clock[3]) < 60 ? Number(clock[1] ?? 0) * 3600 + Number(clock[2]) * 60 + Number(clock[3]) : null;
+}
+
+/** A unit is required on every cell; bare counts never acquire an inferred unit. */
+export function parseDistributionValue(text: string): { value: number; unit: "ratio" | "people" | "views" } | null {
+  const rate = parseRate(text);
+  if (rate != null) return { value: rate, unit: "ratio" };
+  const count = /^\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(万|亿)?\s*(人|次)\s*$/.exec(text);
+  if (!count) return null;
+  const value = Number(count[1].replaceAll(",", "")) * (count[2] === "万" ? 10000 : count[2] === "亿" ? 100000000 : 1);
+  return Number.isSafeInteger(value) ? { value, unit: count[3] === "人" ? "people" : "views" } : null;
 }
 export function parseAnalyticsPage(account: Pick<Account, "id" | "platformId">, sample: AnalyticsPageSample, capturedAt = new Date().toISOString(), workId: string | null = null): { records: AnalyticsRecord[]; states: AnalyticsState[] } {
   const records: AnalyticsRecord[] = [];
@@ -107,9 +130,10 @@ export function parseAnalyticsPage(account: Pick<Account, "id" | "platformId">, 
     for (const group of sample.groups) {
       const metric = labels.audience.includes(group.dimension) ? "audience" : labels.trafficSources.includes(group.dimension) ? "trafficSources" : null;
       if (!metric) continue;
-      const entries = group.entries.map((entry) => ({ label: entry.label, value: parseRate(entry.text) }));
-      if (entries.every((entry) => entry.value != null)) add(metric, group.dimension, group.dates,
-        { kind: "distribution", dimension: group.dimension, entries: entries as Array<{ label: string; value: number }>, unit: "ratio" });
+      const entries = group.entries.map((entry) => ({ label: entry.label, parsed: parseDistributionValue(entry.text) }));
+      const unit = entries[0]?.parsed?.unit;
+      if (unit && entries.every((entry) => entry.parsed?.unit === unit) && !(metric === "audience" && unit === "views")) add(metric, group.dimension, group.dates,
+        { kind: "distribution", dimension: group.dimension, entries: entries.map((entry) => ({ label: entry.label, value: entry.parsed!.value })), unit });
     }
   }
   return { records, states: BUSINESS_METRICS.map((metric) => ({ metric,

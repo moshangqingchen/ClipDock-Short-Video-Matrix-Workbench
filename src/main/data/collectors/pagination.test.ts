@@ -71,6 +71,19 @@ describe("six-platform pagination and missing-field semantics", () => {
     fetch.mockImplementation(async () => Response.json(payloads.douyin, { status: 500 }));
     const result = await createCollectorRegistry().get("douyin")!.collect(ctx);
     expect(result.works).toEqual([]);
-    expect(result.page).toBeUndefined();
+    expect(result.page).toMatchObject({ hasMore: null });
+    expect(result.warnings).toEqual([result.page?.reason]);
+  });
+  it("does not mark an empty page complete before the declared total has been read", () => {
+    const { ctx } = setup("bilibili", {});
+    ctx.progress!.worksSeen = 30;
+    recordWorksPage(ctx, { data: { total: 31 }, has_more: false }, [], "page");
+    expect(ctx.pageResult).toMatchObject({ hasMore: null, receivedCount: 0, total: 31, nextPage: 7 });
+    ctx.progress!.total = 31;
+    recordWorksPage(ctx, {}, [], "page");
+    expect(ctx.pageResult?.hasMore).toBeNull();
+    ctx.progress!.worksSeen = 31;
+    recordWorksPage(ctx, { data: { total: 31 } }, [], "page");
+    expect(ctx.pageResult?.hasMore).toBe(false);
   });
 });

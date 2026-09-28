@@ -9,6 +9,7 @@
 }
 .head {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
@@ -38,9 +39,10 @@
 }
 .headActions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
 }
 .body {
   flex: 1;
@@ -66,7 +68,7 @@
   grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 .cards6 {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 @media (max-width: 1400px) {
   .cards5,

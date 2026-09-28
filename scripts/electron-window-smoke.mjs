@@ -936,6 +936,20 @@ async function verifyCollectionQuality() {
   await sleep(350);
   await evaluate(`[...document.querySelectorAll('tbody tr')].find(r => r.textContent.includes('层级测试 · douyin')).click()`);
   await sleep(350);
+  for (const width of [960, 1440]) {
+    await command('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
+    await sleep(250);
+    const basic = await evaluate(`(() => ({
+      metrics: [...document.querySelectorAll('label select')].find(el => el.closest('label').textContent.includes('趋势指标'))?.options.length,
+      missing: [...document.querySelectorAll('small')].filter(el => el.textContent === '尚未取得该指标').length,
+      overflow: document.documentElement.scrollWidth > innerWidth,
+      nested: document.querySelectorAll('button button').length
+    }))()`);
+    if (basic.metrics !== 8 || basic.missing !== 8 || basic.overflow || basic.nested) throw new Error('eight-metric layout failed: '+JSON.stringify({width,...basic}));
+    const shot = await command('Page.captureScreenshot',{format:'png'});
+    fs.mkdirSync(path.resolve('output/collection'),{recursive:true});
+    fs.writeFileSync(path.resolve('output/collection/basic-'+width+'.png'),Buffer.from(shot.data,'base64'));
+  }
   await evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent === '经营分析').click()`);
   await sleep(250);
   for (const width of [960,1440]) {
@@ -943,7 +957,7 @@ async function verifyCollectionQuality() {
     await sleep(250);
     const ui = await evaluate(`(() => ({
       analytics:[...document.querySelectorAll('h3')].some(h=>h.textContent==='经营分析'),
-      empty:[...document.querySelectorAll('span')].filter(s=>s.textContent==='暂无可验证的数据').length,
+      empty:[...document.querySelectorAll('span')].filter(s=>s.textContent.startsWith('暂无可验证的数据。')).length,
       history:[...document.querySelectorAll('button')].some(b=>b.textContent==='补齐历史作品'),
       overflow:document.documentElement.scrollWidth>innerWidth,
       nested:document.querySelectorAll('button button').length
@@ -955,7 +969,7 @@ async function verifyCollectionQuality() {
     fs.writeFileSync(path.resolve('output/collection/detail-'+width+'.png'),Buffer.from(shot.data,'base64'));
   }
   await command('Emulation.clearDeviceMetricsOverride');
-  console.log('collection quality smoke: six disabled analytics adapters; validated IPC; resumable history; 960/1440 px account detail');
+  console.log('collection quality smoke: eight basic metrics; six analytics adapters; validated IPC; resumable history; 960/1440 px basic and advanced detail');
 }
 
 let ok = false;

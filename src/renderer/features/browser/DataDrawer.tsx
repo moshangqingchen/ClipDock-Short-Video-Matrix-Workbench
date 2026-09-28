@@ -1,8 +1,8 @@
 import { workMetric } from "@shared/metric-quality";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Eye, Heart, MessageCircle, RefreshCw, Users, X } from "lucide-react";
-import type { Account, AccountMetricsView, Work } from "@shared/types";
+import { Eye, Heart, ListVideo, MessageCircle, RefreshCw, Share2, Star, UserPlus, Users, X } from "lucide-react";
+import { METRIC_NAMES, type Account, type MetricName } from "@shared/types";
 import {
   Button,
   Cover,
@@ -15,34 +15,21 @@ import {
   formatRelative,
 } from "@renderer/components/ui";
 import { api } from "@renderer/lib/api";
-import { useToasts } from "@renderer/store";
+import { useToasts, useUi } from "@renderer/store";
 import styles from "./workspace.module.css";
 import { showCollectAccepted } from "@renderer/features/metrics/collect-feedback";
 import { WorkLink } from "@renderer/features/metrics/WorkLink";
+import { useMetricResource } from "@renderer/features/metrics/use-metric-resource";
+import { METRIC_LABELS } from "@renderer/features/metrics/metric-presentation";
+
+const metricIcons: Record<MetricName, typeof Users> = { followers: Users, following: UserPlus, likes: Heart,
+  comments: MessageCircle, plays: Eye, shares: Share2, favorites: Star, works: ListVideo };
 
 export function DataDrawer({ account, onClose }: { account: Account; onClose: () => void }) {
-  const [view, setView] = useState<AccountMetricsView | null>(null);
-  const [works, setWorks] = useState<Work[] | null>(null);
   const [collecting, setCollecting] = useState(false);
-
-  const load = useCallback(
-    () =>
-      Promise.all([api.metrics.account(account.id, 14), api.works.list(account.id, 8)]).then(
-        ([metrics, list]) => {
-          setView(metrics);
-          setWorks(list);
-        },
-      ),
-    [account.id],
-  );
-
-  useEffect(() => {
-    const off = api.on("metrics-updated", ({ accountId }) => {
-      if (accountId === account.id) void load();
-    });
-    void load().catch(() => undefined);
-    return off;
-  }, [account.id, load]);
+  const metrics = useMetricResource(useCallback(() => api.metrics.account(account.id, 14), [account.id]), account.id);
+  const worksResource = useMetricResource(useCallback(() => api.works.list(account.id, 8), [account.id]), account.id);
+  const view = metrics.data, works = worksResource.data;
 
   const collectNow = async () => {
     setCollecting(true);
@@ -78,28 +65,16 @@ export function DataDrawer({ account, onClose }: { account: Account; onClose: ()
         </div>
       </div>
       <div className={styles.drawerBody}>
+        {metrics.error && <div role="alert">账号指标读取失败 <Button size="sm" onClick={metrics.retry}>重试指标</Button></div>}
         <div className={styles.kpiGrid}>
-          <Kpi
-            icon={Users}
-            label="粉丝"
-            value={m?.followers?.current}
-            delta={m?.followers?.day}
-            loading={!view}
-          />
-          <Kpi icon={Heart} label="获赞" value={m?.likes?.current} delta={m?.likes?.day} loading={!view} />
-          <Kpi icon={Eye} label="播放" value={m?.plays?.current} delta={m?.plays?.day} loading={!view} />
-          <Kpi
-            icon={MessageCircle}
-            label="评论"
-            value={m?.comments?.current}
-            delta={m?.comments?.day}
-            loading={!view}
-          />
+          {METRIC_NAMES.map((key) => <Kpi key={key} icon={metricIcons[key]} label={METRIC_LABELS[key]}
+            value={m?.[key]?.current} delta={m?.[key]?.day} loading={!view && metrics.loading} />)}
         </div>
+        <Button size="sm" onClick={() => { useUi.getState().setMetricsAccountId(account.id); useUi.getState().setMetricsPlatform(account.platformId); useUi.getState().setRoute("metrics"); }}>查看全部指标与经营分析</Button>
 
         <div className={styles.section}>
           <h4>近 14 天粉丝趋势</h4>
-          {view && view.trend.length > 1 ? (
+          {view && view.trend.some((point) => point.followers != null) ? (
             <div style={{ height: 120 }}>
               <ResponsiveContainer>
                 <AreaChart data={view.trend} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
@@ -127,7 +102,7 @@ export function DataDrawer({ account, onClose }: { account: Account; onClose: ()
                     stroke="var(--brand-500)"
                     strokeWidth={2}
                     fill="url(#drawerFollowers)"
-                    dot={false}
+                    dot={{ r: 2 }}
                     isAnimationActive={false}
                   />
                 </AreaChart>
@@ -142,9 +117,10 @@ export function DataDrawer({ account, onClose }: { account: Account; onClose: ()
 
         <div className={styles.section}>
           <h4>近期作品</h4>
-          {works == null ? (
+          {worksResource.error && <div role="alert">作品读取失败 <Button size="sm" onClick={worksResource.retry}>重试作品</Button></div>}
+          {works == null && worksResource.loading ? (
             <Skeleton height={56} />
-          ) : works.length === 0 ? (
+          ) : !works?.length ? (
             <EmptyState
               icon={Eye}
               title="暂无作品数据"
@@ -161,6 +137,8 @@ export function DataDrawer({ account, onClose }: { account: Account; onClose: ()
                       <span className="num">▶ {formatNumber(workMetric(work, "plays"))}</span>
                       <span className="num">♥ {formatNumber(workMetric(work, "likes"))}</span>
                       <span className="num">💬 {formatNumber(workMetric(work, "comments"))}</span>
+                      <span className="num">↗ {formatNumber(workMetric(work, "shares"))}</span>
+                      <span className="num">☆ {formatNumber(workMetric(work, "favorites"))}</span>
                       <span>{work.publishedAt ? formatDateTime(work.publishedAt) : ""}</span>
                     </span>
                   </div>

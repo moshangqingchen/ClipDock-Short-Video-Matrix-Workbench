@@ -61,6 +61,23 @@ const overview: OverviewView = {
 };
 
 describe("renderer media DTO projection", () => {
+  it("preserves all metric trends, missing points and coverage without exposing incidental response fields", () => {
+    const input = { ...overview, coverage: { following: 1, shares: 1 }, dayCoverage: { shares: 0 },
+      trend: [{ date: "2026-09-28", followers: null, likes: null, plays: null, following: 20, comments: 3, shares: 0, favorites: null, works: 2,
+        coverage: { shares: 1, favorites: 0 }, rawResponse: "private-response" }],
+      platforms: [{ ...platform, dayCoverage: { plays: 1 }, accounts: [{ ...platform.accounts[0],
+        lastRun: { id: 1, accountId: "owner", platformId: "bilibili" as const, startedAt: account.createdAt, finishedAt: account.createdAt,
+          status: "partial" as const, trigger: "manual" as const, message: "作品列表未返回", metricsWritten: 4, worksWritten: 0, rawResponse: "private-response" },
+      }] }],
+    };
+    const result = createMediaProjection({ enforcement: "strict" }).projectOverview(input);
+    expect(result.coverage).toEqual(input.coverage);
+    expect(result.dayCoverage).toEqual(input.dayCoverage);
+    expect(result.trend[0]).toMatchObject({ shares: 0, favorites: null, following: 20, comments: 3, works: 2, coverage: { shares: 1, favorites: 0 } });
+    expect(result.platforms[0].accounts[0].lastRun).toMatchObject({ status: "partial", metricsWritten: 4 });
+    expect(result.platforms[0].dayCoverage).toEqual({ plays: 1 });
+    expect(JSON.stringify(result)).not.toContain("private-response");
+  });
   it("keeps safe check feedback on IPC responses without exporting unknown observation fields", () => {
     const checkInfo = {state: "paused" as const, reason: "国内网络暂停", attemptedAt: "2026-09-12T00:00:00Z", token: "must-not-export"};
     const projected = createMediaProjection({enforcement: "strict"}).projectAccount({...account, checkInfo});

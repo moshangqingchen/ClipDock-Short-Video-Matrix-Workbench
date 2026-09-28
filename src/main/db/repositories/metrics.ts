@@ -1,4 +1,4 @@
-import type { CollectRun, MetricName, MetricSnapshot, Work, MetricOrigin, WorkMetric } from "@shared/types";
+import type { CollectRun, MetricName, MetricSnapshot, Work, MetricOrigin, WorkMetric, WorkMetricCoverage } from "@shared/types";
 import { METRIC_NAMES, WORK_METRICS } from "@shared/types";
 import type { PlatformId } from "@shared/platforms";
 import type { Database } from "../database";
@@ -97,6 +97,16 @@ function toRun(row: RunRow): CollectRun {
   };
 }
 
+export type MetricBoundary = "current" | "day" | "week" | "month";
+export type ObservedMetric = { value: number; capturedAt: string; origin: MetricOrigin };
+export type BoundaryValues = Record<MetricBoundary, Map<MetricName, ObservedMetric>>;
+export interface WorkSummary {
+  count: number;
+  capturedAt: string | null;
+  totals: Partial<Record<WorkMetric, number>>;
+  coverage: Partial<Record<WorkMetric, WorkMetricCoverage>>;
+}
+
 export class MetricsRepository {
   constructor(private readonly db: Database) {}
 
@@ -119,14 +129,104 @@ export class MetricsRepository {
     });
   }
 
-  /** Latest account-level value per metric. */
-  workSummary(accountId: string): { count: number; capturedAt: string | null; totals: Partial<Record<WorkMetric, number>> } {
-    const summary = this.db.get<{ count: number; capturedAt: string | null }>("SELECT COUNT(*) AS count,MAX(fetched_at) AS capturedAt FROM works WHERE account_id=?", [accountId]);
-    const count = Number(summary?.count ?? 0);
-    const row = this.db.get<Record<WorkMetric, number | null>>(`SELECT ${WORK_METRICS.map((metric) =>
-      `SUM(CASE WHEN observations_json IS NULL OR json_extract(observations_json, '$.${metric}') IS NOT NULL THEN ${metric} END) AS ${metric}`,
-    ).join(",")} FROM works WHERE account_id=?`, [accountId]);
-    return { count, capturedAt: summary?.capturedAt ?? null, totals: Object.fromEntries(WORK_METRICS.filter((metric) => row?.[metric] != null).map((metric) => [metric, Number(row![metric])])) };
+  /** All stored works, independently of the currently displayed page; never account totals. */
+  workSummary(accountId: string): WorkSummary {
+    return this.workSummaries([accountId]).get(accountId)!;
+  }
+
+  workSummaries(accountIds: readonly string[]): Map<string, WorkSummary> {
+    const result = new Map(accountIds.map((id) => [id, { count: 0, capturedAt: null, totals: {}, coverage: {} } as WorkSummary]));
+    if (!accountIds.length) return result;
+    const fields = WORK_METRICS.flatMap((metric) => {
+      const known = `(observations_json IS NULL OR json_extract(observations_json, '$.${metric}') IS NOT NULL)`;
+      const legacy = `(observations_json IS NULL OR COALESCE(json_extract(observations_json, '$.${metric}.origin'), 'legacy') = 'legacy')`;
+      return [
+        `SUM(CASE WHEN ${known} THEN ${metric} END) AS ${metric}`,
+        `SUM(CASE WHEN ${known} THEN 1 ELSE 0 END) AS ${metric}_observed`,
+        `SUM(CASE WHEN ${known} AND ${legacy} THEN 1 ELSE 0 END) AS ${metric}_legacy`,
+        `MAX(CASE WHEN ${known} THEN strftime('%Y-%m-%dT%H:%M:%fZ', COALESCE(json_extract(observations_json, '$.${metric}.capturedAt'), fetched_at)) END) AS ${metric}_captured`,
+      ];
+    });
+    const rows = this.db.all<Record<string, unknown> & { account_id: string; count: number; captured_at: string | null }>(
+      `SELECT account_id, COUNT(*) AS count, MAX(strftime('%Y-%m-%dT%H:%M:%fZ', fetched_at)) AS captured_at, ${fields.join(",")}
+       FROM works WHERE account_id IN (SELECT value FROM json_each(?)) GROUP BY account_id`,
+      [JSON.stringify(accountIds)],
+    );
+    for (const row of rows) {
+      const summary: WorkSummary = { count: Number(row.count), capturedAt: row.captured_at, totals: {}, coverage: {} };
+      for (const metric of WORK_METRICS) {
+        if (row[metric] != null) summary.totals[metric] = Number(row[metric]);
+        summary.coverage[metric] = {
+          observed: Number(row[`${metric}_observed`]),
+          legacy: Number(row[`${metric}_legacy`]),
+          capturedAt: row[`${metric}_captured`] as string | null,
+        };
+      }
+      result.set(row.account_id, summary);
+    }
+    return result;
+  }
+
+  /** Bounded indexed seeks: four boundaries × eight metrics, in one query for every account. */
+  boundaryValues(accountIds: readonly string[], boundaries: Record<MetricBoundary, string>): Map<string, BoundaryValues> {
+    const result = new Map(accountIds.map((id) => [id, {
+      current: new Map(), day: new Map(), week: new Map(), month: new Map(),
+    } as BoundaryValues]));
+    if (!accountIds.length) return result;
+    const rows = this.db.all<SnapshotRow & { boundary: MetricBoundary }>(
+      `WITH requested AS (SELECT value AS account_id FROM json_each(?)),
+       names AS (SELECT value AS metric FROM json_each(?)),
+       boundaries AS (SELECT key AS boundary, value AS captured_at FROM json_each(?))
+       SELECT m.*, b.boundary FROM requested r CROSS JOIN names n CROSS JOIN boundaries b
+       JOIN metric_snapshots m ON m.id = (
+         SELECT id FROM metric_snapshots WHERE account_id = r.account_id AND metric = n.metric
+           AND work_id IS NULL AND julianday(captured_at) <= julianday(b.captured_at)
+           AND (b.boundary = 'current' OR julianday(captured_at) < julianday(b.captured_at))
+         ORDER BY julianday(captured_at) DESC, id DESC LIMIT 1
+       )`,
+      [JSON.stringify(accountIds), JSON.stringify(METRIC_NAMES), JSON.stringify(boundaries)],
+    );
+    for (const row of rows) result.get(row.account_id)![row.boundary].set(row.metric as MetricName, {
+      value: Number(row.value), capturedAt: row.captured_at, origin: row.origin ?? "legacy",
+    });
+    return result;
+  }
+
+  /** Actual daily last observations only, without filling missing values or future dates. */
+  dailySeriesBatch(accountIds: readonly string[], sinceIso: string, untilIso: string): Map<string, Array<{ date: string; metric: MetricName; value: number }>> {
+    const result = new Map(accountIds.map((id) => [id, [] as Array<{ date: string; metric: MetricName; value: number }>]));
+    if (!accountIds.length) return result;
+    const rows = this.db.all<{ account_id: string; date: string; metric: MetricName; value: number }>(
+      `SELECT account_id, date, metric, value FROM (
+         SELECT account_id, date(captured_at, '+8 hours') AS date, metric, value,
+           ROW_NUMBER() OVER (PARTITION BY account_id, metric, date(captured_at, '+8 hours')
+             ORDER BY julianday(captured_at) DESC, id DESC) AS rn
+         FROM metric_snapshots INDEXED BY idx_account_metric_instant
+         WHERE account_id IN (SELECT value FROM json_each(?))
+           AND work_id IS NULL AND metric IN (SELECT value FROM json_each(?))
+           AND julianday(captured_at) >= julianday(?) AND julianday(captured_at) <= julianday(?)
+       ) WHERE rn = 1 ORDER BY account_id, date, metric`,
+      [JSON.stringify(accountIds), JSON.stringify(METRIC_NAMES), sinceIso, untilIso],
+    );
+    for (const row of rows) if (METRIC_NAMES.includes(row.metric) && row.date) {
+      result.get(row.account_id)!.push({ date: row.date, metric: row.metric, value: Number(row.value) });
+    }
+    return result;
+  }
+
+  lastAttemptedRuns(accountIds: readonly string[]): Map<string, CollectRun | null> {
+    const result = new Map(accountIds.map((id) => [id, null as CollectRun | null]));
+    if (!accountIds.length) return result;
+    const rows = this.db.all<RunRow>(
+      `WITH requested AS (SELECT value AS account_id FROM json_each(?))
+       SELECT c.* FROM requested r JOIN collect_runs c ON c.id = (
+         SELECT id FROM collect_runs WHERE account_id = r.account_id AND status <> 'skipped'
+           AND trigger_kind <> 'keepalive' ORDER BY started_at DESC, id DESC LIMIT 1
+       )`,
+      [JSON.stringify(accountIds)],
+    );
+    for (const row of rows) result.set(row.account_id, toRun(row));
+    return result;
   }
 
   latest(accountId: string): Map<MetricName, { value: number; capturedAt: string; origin: MetricOrigin }> {
@@ -205,7 +305,7 @@ export class MetricsRepository {
         const w = { ...incoming };
           if (old) {
             w.id = old.id;
-            if (incoming.fetchedAt < old.fetchedAt) {
+            if (Date.parse(incoming.fetchedAt) < Date.parse(old.fetchedAt)) {
               w.title = old.title; w.coverUrl = old.coverUrl; w.url = old.url;
               w.publishedAt = old.publishedAt; w.status = old.status;
             }
@@ -218,11 +318,11 @@ export class MetricsRepository {
             [metric, { capturedAt: old.fetchedAt, origin: "legacy" as const }]))), };
           for (const metric of WORK_METRICS) {
             const next = incoming.observations === undefined ? { capturedAt: incoming.fetchedAt, origin: "legacy" as const } : incoming.observations[metric];
-            if (next && (!observations[metric] || next.capturedAt >= observations[metric]!.capturedAt)) observations[metric] = next;
+            if (next && (!observations[metric] || Date.parse(next.capturedAt) >= Date.parse(observations[metric]!.capturedAt))) observations[metric] = next;
             else w[metric] = old[metric];
           }
           w.observations = observations;
-          w.fetchedAt = incoming.fetchedAt > old.fetchedAt ? incoming.fetchedAt : old.fetchedAt;
+          w.fetchedAt = Date.parse(incoming.fetchedAt) > Date.parse(old.fetchedAt) ? incoming.fetchedAt : old.fetchedAt;
         }
         this.db.run(
           `INSERT INTO works (id, account_id, platform_id, remote_id, title, cover_url, url, published_at, status,

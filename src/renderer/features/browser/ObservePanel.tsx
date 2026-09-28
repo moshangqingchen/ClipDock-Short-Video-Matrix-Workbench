@@ -1,5 +1,5 @@
 import { workMetric } from "@shared/metric-quality";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
   Eye,
@@ -14,7 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { PLATFORMS } from "@shared/platforms";
-import type { Account, AccountMetricsView, MetricName, Work } from "@shared/types";
+import type { Account, MetricName } from "@shared/types";
 import {
   Badge,
   Button,
@@ -33,11 +33,12 @@ import {
   formatRelative,
 } from "@renderer/components/ui";
 import { api } from "@renderer/lib/api";
-import { useToasts } from "@renderer/store";
+import { useToasts, useUi } from "@renderer/store";
 import dash from "@renderer/features/dashboard/dashboard.module.css";
 import styles from "./observe.module.css";
 import { showCollectAccepted } from "@renderer/features/metrics/collect-feedback";
 import { WorkLink } from "@renderer/features/metrics/WorkLink";
+import { useMetricResource } from "@renderer/features/metrics/use-metric-resource";
 
 type Range = 7 | 30 | 90;
 
@@ -56,6 +57,8 @@ const TOTAL_CARDS: Array<{ metric: MetricName; label: string; icon: typeof Users
   { metric: "plays", label: "播放总数", icon: Eye, accent: "#0ea5e9" },
   { metric: "favorites", label: "收藏总数", icon: Star, accent: "#8b5cf6" },
   { metric: "works", label: "作品数", icon: ListVideo, accent: "#6366f1" },
+  { metric: "following", label: "关注总数", icon: UserPlus, accent: "#14b8a6" },
+  { metric: "shares", label: "分享总数", icon: Share2, accent: "#a855f7" },
 ];
 
 /**
@@ -66,28 +69,10 @@ const TOTAL_CARDS: Array<{ metric: MetricName; label: string; icon: typeof Users
 export function ObservePanel({ account, onClose }: { account: Account; onClose: () => void }) {
   const platform = PLATFORMS[account.platformId];
   const [range, setRange] = useState<Range>(30);
-  const [view, setView] = useState<AccountMetricsView | null>(null);
-  const [works, setWorks] = useState<Work[] | null>(null);
   const [collecting, setCollecting] = useState(false);
-
-  const load = useCallback(
-    () =>
-      Promise.all([api.metrics.account(account.id, range), api.works.list(account.id, 30)]).then(
-        ([metrics, list]) => {
-          setView(metrics);
-          setWorks(list);
-        },
-      ),
-    [account.id, range],
-  );
-
-  useEffect(() => {
-    const off = api.on("metrics-updated", ({ accountId }) => {
-      if (accountId === account.id) void load();
-    });
-    void load().catch(() => undefined);
-    return off;
-  }, [account.id, load]);
+  const metrics = useMetricResource(useCallback(() => api.metrics.account(account.id, range), [account.id, range]), account.id);
+  const worksResource = useMetricResource(useCallback(() => api.works.list(account.id, 30), [account.id]), account.id);
+  const view = metrics.data, works = worksResource.data;
 
   const collectNow = async () => {
     setCollecting(true);
@@ -134,11 +119,13 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
           <Button icon={RefreshCw} loading={collecting} disabled={!online} onClick={collectNow}>
             立即采集
           </Button>
+          <Button onClick={() => { useUi.getState().setMetricsAccountId(account.id); useUi.getState().setMetricsPlatform(account.platformId); useUi.getState().setRoute("metrics"); }}>完整数据与经营分析</Button>
           <IconButton icon={X} label="返回页面" onClick={onClose} />
         </div>
       </div>
 
       <div className={styles.body}>
+        {metrics.error && <div role="alert">账号指标读取失败 <Button size="sm" onClick={metrics.retry}>重试指标</Button></div>}
         <section>
           <h3 className={styles.sectionTitle}>今日数据观测</h3>
           <div className={cx(styles.cards, styles.cards5)}>
@@ -148,7 +135,7 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
                 icon={card.icon}
                 label={card.label}
                 accent={card.accent}
-                loading={!view}
+                loading={!view && metrics.loading}
                 value={m[card.metric]?.day}
                 signed
                 foot={
@@ -171,11 +158,11 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
                 icon={card.icon}
                 label={card.label}
                 accent={card.accent}
-                loading={!view}
+                loading={!view && metrics.loading}
                 value={m[card.metric]?.current}
                 foot={
                   <>
-                    <Delta value={m[card.metric]?.day} /> <span>今日</span>
+                    <Delta value={m[card.metric]?.day} /> <span>{m[card.metric]?.capturedAt ? `更新 ${formatRelative(m[card.metric]?.capturedAt)}` : "尚未取得该指标"}</span>
                   </>
                 }
               />
@@ -202,7 +189,7 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
               </div>
             </div>
             <div style={{ height: 220 }}>
-              {view && view.trend.length > 1 ? (
+              {view && view.trend.some((point) => point.followers != null || point.likes != null) ? (
                 <ResponsiveContainer>
                   <AreaChart data={view.trend} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
                     <defs>
@@ -262,7 +249,7 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
                       stroke={platform.color}
                       strokeWidth={2}
                       fill="url(#obsF)"
-                      dot={false}
+                      dot={{ r: 2 }}
                       isAnimationActive={false}
                     />
                     <Area
@@ -272,14 +259,14 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
                       stroke="#ec4899"
                       strokeWidth={2}
                       fill="url(#obsL)"
-                      dot={false}
+                      dot={{ r: 2 }}
                       isAnimationActive={false}
                     />
                   </AreaChart>
                 </ResponsiveContainer>
               ) : (
                 <div className={styles.chartEmpty}>
-                  {view ? "累计两天以上的采集后显示趋势" : <Skeleton height={180} width="100%" />}
+                  {view || !metrics.loading ? "累计两天以上的采集后显示趋势，未观测日期保留缺口" : <Skeleton height={180} width="100%" />}
                 </div>
               )}
             </div>
@@ -289,13 +276,14 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
             <div className={dash.cardHead}>
               <div>
                 <h3>作品榜</h3>
-                <p>按播放量排序,取前 8</p>
+                <p>最近 30 个已采集作品中，按播放量取前 8；非全部作品排名</p>
               </div>
               <span style={{ fontSize: "var(--text-xs)", color: "var(--fg-muted)" }}>
                 {works?.length ?? 0} 个作品
               </span>
             </div>
-            {works == null ? (
+            {worksResource.error && <div role="alert">作品读取失败 <Button size="sm" onClick={worksResource.retry}>重试作品</Button></div>}
+            {works == null && worksResource.loading ? (
               <Skeleton height={120} />
             ) : topWorks.length === 0 ? (
               <EmptyState
@@ -316,6 +304,7 @@ export function ObservePanel({ account, onClose }: { account: Account; onClose: 
                         <em className="num">♥ {formatNumber(workMetric(work, "likes"))}</em>
                         <em className="num">💬 {formatNumber(workMetric(work, "comments"))}</em>
                         <em className="num">↗ {formatNumber(workMetric(work, "shares"))}</em>
+                        <em className="num">☆ {formatNumber(workMetric(work, "favorites"))}</em>
                         <em>{formatDateTime(work.publishedAt)}</em>
                       </span>
                     </div>

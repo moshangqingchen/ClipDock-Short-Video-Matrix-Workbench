@@ -16,6 +16,9 @@ import {
   worksToMetrics,
   worksJson,
   recordWorksPage,
+  finishWorksPage,
+  withIdentityProfile,
+  businessResponseAllowsData,
   type Collector,
   type CollectorContext,
   type CollectorProfile,
@@ -46,7 +49,7 @@ async function readProfile(ctx: CollectorContext): Promise<CollectorProfile | nu
         init: { method: "POST", headers: JSON_HEADERS, body: "{}" },
       },
     ],
-    (j) => pick(j, "result") === 1 && Boolean(pick(j, "data")),
+    (j) => businessResponseAllowsData(j, "kuaishou") && pick(j, "result") === 1 && Boolean(pick(j, "data")),
   );
   if (!json) return null;
   const data = pick(json, "data") as Record<string, unknown>;
@@ -101,6 +104,7 @@ async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work
   recordWorksPage(ctx, json, list, "cursor", ["data.pcursor","pcursor"]);
   return list
     .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return null;
       const remoteId = String(firstDefined(item, ["photoId", "id", "workId"]) ?? "");
       if (!remoteId) return null;
       return makeWork(
@@ -136,14 +140,12 @@ export const kuaishouCollector: Collector = {
     const result = emptyResult();
     const capturedAt = new Date().toISOString();
     let profile = ctx.skipProfile ? null : await readProfile(ctx);
-    if (!ctx.skipProfile) profile = completeProfile(profile, await domScrapeNumbers(ctx.webContents, DEFAULT_LABELS), result.warnings);
+    if (!ctx.skipProfile) profile = completeProfile(withIdentityProfile(profile, ctx.identityProfile), await domScrapeNumbers(ctx.webContents, DEFAULT_LABELS), result.warnings);
     const fetchedWorks = await readWorks(ctx, capturedAt);
-    if (fetchedWorks === null) result.warnings.push("作品接口不可用");
     const works = fetchedWorks ?? [];
     result.profile = profile;
     result.works = works;
-    result.page = ctx.pageResult;
-    if (result.page?.hasMore === null) result.warnings.push(result.page.reason ?? "分页范围未确认");
+    result.page = finishWorksPage(ctx, fetchedWorks, result.warnings);
     result.metrics = [
       ...(profile ? profileToMetrics(ctx.account, profile, capturedAt) : []),
       ...worksToMetrics(works, capturedAt),

@@ -1,249 +1,173 @@
 import type {
-  Account,
-  AccountMetricsView,
-  MetricDelta,
-  MetricName,
-  OverviewView,
-  PlatformSummaryView,
+  Account, AccountMetricsView, MetricDelta, MetricName, MetricTrendPoint,
+  OverviewView, PlatformSummaryView,
 } from "@shared/types";
 import { METRIC_NAMES } from "@shared/types";
 import { PLATFORM_IDS, type PlatformId } from "@shared/platforms";
 import type { Store } from "@main/db";
+import type { MetricBoundary, ObservedMetric } from "@main/db/repositories/metrics";
 import { beijingDayStart } from "@shared/metric-quality";
 
-const ACCOUNT_METRICS: readonly MetricName[] = [
-  "followers",
-  "following",
-  "likes",
-  "comments",
-  "plays",
-  "shares",
-  "favorites",
-  "works",
-];
-const TOTAL_METRICS: readonly MetricName[] = [
-  "followers",
-  "likes",
-  "comments",
-  "plays",
-  "shares",
-  "favorites",
-  "works",
-];
-
-function isoDaysAgo(days: number, now = Date.now()): string {
-  return beijingDayStart(days - 1, now);
+function validateDays(days: number): void {
+  if (!Number.isInteger(days) || days < 1 || days > 365) throw new Error("时间范围须为 1–365 天的整数");
 }
 
-/** Beijing start of the day `daysAgo` days back, as an ISO (UTC) string. */
-function startOfLocalDayIso(daysAgo: number, now = Date.now()): string {
-  return beijingDayStart(daysAgo, now);
+function emptyPoint(date: string): MetricTrendPoint {
+  return { date, followers: null, following: null, likes: null, comments: null, plays: null,
+    shares: null, favorites: null, works: null, coverage: {} };
 }
 
-function delta(current: number | null, previous: number | null): number | null {
-  if (current == null || previous == null) return null;
-  return current - previous;
+/** Include explicit gaps between observations so charts cannot join across missing days. */
+function calendarPoints(byDate: Map<string, MetricTrendPoint>): MetricTrendPoint[] {
+  const dates = [...byDate.keys()].sort();
+  if (!dates.length) return [];
+  const result: MetricTrendPoint[] = [];
+  const last = Date.parse(dates.at(-1)! + "T00:00:00Z");
+  for (let time = Date.parse(dates[0] + "T00:00:00Z"); time <= last; time += 86_400_000) {
+    const date = new Date(time).toISOString().slice(0, 10);
+    result.push(byDate.get(date) ?? emptyPoint(date));
+  }
+  return result;
+}
+
+function observedDelta(current: ObservedMetric, previous: ObservedMetric | undefined, boundary: string): number | null {
+  // Stale values are not observations for this period; missing history is unknown.
+  if (!previous || Date.parse(current.capturedAt) < Date.parse(boundary)) return null;
+  return current.value - previous.value;
 }
 
 export class ReadModel {
   constructor(private readonly store: Store) {}
 
   account(accountId: string, days = 30): AccountMetricsView {
+    validateDays(days);
     const account = this.store.accounts.get(accountId);
     if (!account) throw new Error("账号不存在");
-    const latest = this.store.metrics.latest(accountId);
-    const now = Date.now();
-    const metrics: Partial<Record<MetricName, MetricDelta>> = {};
-    let capturedAt: string | null = null;
-    for (const metric of ACCOUNT_METRICS) {
-      const current = latest.get(metric);
-      if (!current) continue;
-      if (capturedAt === null || current.capturedAt > capturedAt) capturedAt = current.capturedAt;
-      // "今日" is measured against the last value before local midnight; when
-      // the account was first collected today, the day's earliest snapshot is
-      // the baseline so a fresh account shows +0 rather than "—".
-      const baseline = (daysAgo: number) => {
-        const boundary = startOfLocalDayIso(daysAgo, now);
-        return (
-          this.store.metrics.valueAt(accountId, metric, boundary) ??
-          this.store.metrics.firstValueSince(accountId, metric, boundary)
-        );
-      };
-      metrics[metric] = {
-        capturedAt: current.capturedAt,
-        origin: current.origin,
-        current: current.value,
-        day: delta(current.value, baseline(0)),
-        week: delta(current.value, baseline(6)),
-        month: delta(current.value, baseline(29)),
-      };
-    }
-    const since = isoDaysAgo(days, now);
-    const followers = this.store.metrics.dailySeries(accountId, "followers", since);
-    const likes = this.store.metrics.dailySeries(accountId, "likes", since);
-    const plays = this.store.metrics.dailySeries(accountId, "plays", since);
-    const dates = new Set([...followers, ...likes, ...plays].map((p) => p.date));
-    const byDate = (series: Array<{ date: string; value: number }>) =>
-      new Map(series.map((p) => [p.date, p.value]));
-    const f = byDate(followers);
-    const l = byDate(likes);
-    const p = byDate(plays);
-    const trend = [...dates].sort().map((date) => ({
-      date,
-      followers: f.get(date) ?? null,
-      likes: l.get(date) ?? null,
-      plays: p.get(date) ?? null,
-    }));
-    const works = this.store.metrics.workSummary(accountId);
-    if (works.capturedAt && (!capturedAt || works.capturedAt > capturedAt)) capturedAt = works.capturedAt;
-    return {
-      accountId,
-      collectedWorkCount: works.count,
-      workTotals: works.totals,
-      platformId: account.platformId,
-      capturedAt,
-      metrics,
-      trend: fillForward(trend),
-      lastRun: this.store.metrics.lastAttemptedRun(accountId),
-    };
+    return this.readAccounts([account], days).get(accountId)!;
   }
 
   platform(platformId: PlatformId, days = 30): PlatformSummaryView {
+    validateDays(days);
     const accounts = this.store.accounts.list().filter((a) => a.platformId === platformId);
-    return this.summarize(platformId, accounts, days);
+    return this.summarize(platformId, accounts, this.readAccounts(accounts, days));
   }
 
   overview(days = 30): OverviewView {
+    validateDays(days);
     const accounts = this.store.accounts.list();
-    const platforms = PLATFORM_IDS.map((id) =>
-      this.summarize(
-        id,
-        accounts.filter((a) => a.platformId === id),
-        days,
-      ),
-    ).filter((p) => p.accountCount > 0);
+    const views = this.readAccounts(accounts, days);
+    const platforms = PLATFORM_IDS.map((id) => this.summarize(
+      id, accounts.filter((a) => a.platformId === id), views,
+    )).filter((p) => p.accountCount > 0);
     const totals: Partial<Record<MetricName, number>> = {};
     const dayDelta: Partial<Record<MetricName, number>> = {};
-    for (const platform of platforms) {
-      for (const metric of TOTAL_METRICS) {
-        if (platform.totals[metric] != null)
-          totals[metric] = (totals[metric] ?? 0) + (platform.totals[metric] ?? 0);
-        if (platform.dayDelta[metric] != null)
-          dayDelta[metric] = (dayDelta[metric] ?? 0) + (platform.dayDelta[metric] ?? 0);
-      }
+    const coverage: Partial<Record<MetricName, number>> = {};
+    const dayCoverage: Partial<Record<MetricName, number>> = {};
+    for (const platform of platforms) for (const metric of METRIC_NAMES) {
+      if (platform.totals[metric] != null) totals[metric] = (totals[metric] ?? 0) + platform.totals[metric]!;
+      if (platform.dayDelta[metric] != null) dayDelta[metric] = (dayDelta[metric] ?? 0) + platform.dayDelta[metric]!;
+      if (platform.coverage?.[metric]) coverage[metric] = (coverage[metric] ?? 0) + platform.coverage[metric]!;
+      if (platform.dayCoverage?.[metric]) dayCoverage[metric] = (dayCoverage[metric] ?? 0) + platform.dayCoverage[metric]!;
     }
     const attention = accounts
       .filter((a) => a.status === "offline" || a.status === "needs_verification" || a.status === "expiring")
-      .map((a) => ({
-        accountId: a.id,
-        displayName: a.displayName,
-        platformId: a.platformId,
-        status: a.status,
-        message: a.statusMessage ?? "",
-      }));
+      .map((a) => ({ accountId: a.id, displayName: a.displayName, platformId: a.platformId,
+        status: a.status, message: a.statusMessage ?? "" }));
     return {
       accountCount: accounts.length,
       onlineCount: accounts.filter((a) => a.status === "online" || a.status === "expiring").length,
-      attentionCount: attention.length,
-      totals,
-      dayDelta,
-      platforms,
-      trend: this.globalTrend(accounts, days),
-      attention,
+      attentionCount: attention.length, totals, dayDelta, coverage, dayCoverage, platforms,
+      trend: this.globalTrend(views), attention,
     };
   }
 
-  private summarize(platformId: PlatformId, accounts: Account[], days: number): PlatformSummaryView {
-    const coverage: Partial<Record<MetricName, number>> = {};
+  /** Four batched reads shared by account rows, summaries and all eight trends. */
+  private readAccounts(accounts: Account[], days: number): Map<string, AccountMetricsView> {
+    const ids = accounts.map((a) => a.id);
     const now = Date.now();
+    const boundaries: Record<MetricBoundary, string> = {
+      current: new Date(now).toISOString(), day: beijingDayStart(0, now),
+      week: beijingDayStart(6, now), month: beijingDayStart(29, now),
+    };
+    const values = this.store.metrics.boundaryValues(ids, boundaries);
+    const daily = this.store.metrics.dailySeriesBatch(ids, beijingDayStart(days - 1, now), boundaries.current);
+    const works = this.store.metrics.workSummaries(ids);
+    const runs = this.store.metrics.lastAttemptedRuns(ids);
+    return new Map(accounts.map((account) => {
+      const snapshots = values.get(account.id)!;
+      const metrics: Partial<Record<MetricName, MetricDelta>> = {};
+      let capturedAt: string | null = null;
+      for (const metric of METRIC_NAMES) {
+        const current = snapshots.current.get(metric);
+        if (!current) continue;
+        if (!capturedAt || Date.parse(current.capturedAt) > Date.parse(capturedAt)) capturedAt = current.capturedAt;
+        metrics[metric] = {
+          capturedAt: current.capturedAt, origin: current.origin, current: current.value,
+          day: observedDelta(current, snapshots.day.get(metric), boundaries.day),
+          week: observedDelta(current, snapshots.week.get(metric), boundaries.week),
+          month: observedDelta(current, snapshots.month.get(metric), boundaries.month),
+        };
+      }
+      const byDate = new Map<string, MetricTrendPoint>();
+      for (const item of daily.get(account.id)!) {
+        const point = byDate.get(item.date) ?? emptyPoint(item.date);
+        point[item.metric] = item.value;
+        point.coverage![item.metric] = 1;
+        byDate.set(item.date, point);
+      }
+      const summary = works.get(account.id)!;
+      if (summary.capturedAt && (!capturedAt || Date.parse(summary.capturedAt) > Date.parse(capturedAt))) capturedAt = summary.capturedAt;
+      return [account.id, {
+        accountId: account.id, platformId: account.platformId, capturedAt, metrics,
+        collectedWorkCount: summary.count, workTotals: summary.totals, workCoverage: summary.coverage,
+        trend: calendarPoints(byDate), lastRun: runs.get(account.id) ?? null,
+      }];
+    }));
+  }
+
+  private summarize(platformId: PlatformId, accounts: Account[], views: Map<string, AccountMetricsView>): PlatformSummaryView {
+    const coverage: Partial<Record<MetricName, number>> = {};
+    const dayCoverage: Partial<Record<MetricName, number>> = {};
     const totals: Partial<Record<MetricName, number>> = {};
     const dayDelta: Partial<Record<MetricName, number>> = {};
     const rows = accounts.map((account) => {
-      const view = this.account(account.id, Math.min(days, 14));
-      for (const metric of TOTAL_METRICS) {
+      const view = views.get(account.id)!;
+      for (const metric of METRIC_NAMES) {
         const value = view.metrics[metric];
-        if (!value || value.current == null) continue;
+        if (value?.current == null) continue;
         coverage[metric] = (coverage[metric] ?? 0) + 1;
         totals[metric] = (totals[metric] ?? 0) + value.current;
-        if (value.day != null) dayDelta[metric] = (dayDelta[metric] ?? 0) + value.day;
+        if (value.day != null) {
+          dayDelta[metric] = (dayDelta[metric] ?? 0) + value.day;
+          dayCoverage[metric] = (dayCoverage[metric] ?? 0) + 1;
+        }
       }
-      const spark = view.trend.map((point) => point.followers ?? 0).slice(-14);
       return {
-        accountId: account.id,
-        displayName: account.displayName,
-        avatarUrl: account.avatarUrl,
-        status: account.status,
-        metrics: view.metrics,
-        capturedAt: view.capturedAt,
-        spark,
+        accountId: account.id, displayName: account.displayName, avatarUrl: account.avatarUrl,
+        status: account.status, metrics: view.metrics, capturedAt: view.capturedAt, lastRun: view.lastRun,
+        spark: view.trend.slice(-14).map((point) => point.followers),
       };
     });
-    void now;
     return {
-      platformId,
-      coverage,
-      accountCount: accounts.length,
+      platformId, coverage, dayCoverage, accountCount: accounts.length,
       onlineCount: accounts.filter((a) => a.status === "online" || a.status === "expiring").length,
-      totals,
-      dayDelta,
-      accounts: rows,
+      totals, dayDelta, accounts: rows,
     };
   }
 
-  private globalTrend(accounts: Account[], days: number): OverviewView["trend"] {
-    const since = isoDaysAgo(days);
-    const perDate = new Map<string, { followers: number; likes: number; plays: number }>();
-    const dates = new Set<string>();
-    const series = accounts.map((account) => ({
-      followers: fillMap(this.store.metrics.dailySeries(account.id, "followers", since)),
-      likes: fillMap(this.store.metrics.dailySeries(account.id, "likes", since)),
-      plays: fillMap(this.store.metrics.dailySeries(account.id, "plays", since)),
-    }));
-    for (const s of series)
-      for (const map of [s.followers, s.likes, s.plays]) for (const date of map.keys()) dates.add(date);
-    const sorted = [...dates].sort();
-    for (const date of sorted) {
-      const point = { followers: 0, likes: 0, plays: 0 };
-      for (const s of series) {
-        point.followers += lastAtOrBefore(s.followers, date);
-        point.likes += lastAtOrBefore(s.likes, date);
-        point.plays += lastAtOrBefore(s.plays, date);
+  private globalTrend(views: Map<string, AccountMetricsView>): MetricTrendPoint[] {
+    const byDate = new Map<string, MetricTrendPoint>();
+    for (const view of views.values()) for (const daily of view.trend) {
+      const point = byDate.get(daily.date) ?? emptyPoint(daily.date);
+      for (const metric of METRIC_NAMES) {
+        if (daily[metric] == null) continue;
+        point[metric] = (point[metric] ?? 0) + daily[metric]!;
+        point.coverage![metric] = (point.coverage![metric] ?? 0) + 1;
       }
-      perDate.set(date, point);
+      byDate.set(daily.date, point);
     }
-    return sorted.map((date) => ({ date, ...perDate.get(date)! }));
+    return calendarPoints(byDate);
   }
-}
-
-function fillMap(series: Array<{ date: string; value: number }>): Map<string, number> {
-  return new Map(series.map((p) => [p.date, p.value]));
-}
-
-function lastAtOrBefore(map: Map<string, number>, date: string): number {
-  let best: number | null = null;
-  let bestDate = "";
-  for (const [d, v] of map) {
-    if (d <= date && d >= bestDate) {
-      best = v;
-      bestDate = d;
-    }
-  }
-  return best ?? 0;
-}
-
-/** Carry forward the last known value so charts have no holes. */
-function fillForward<T extends { followers: number | null; likes: number | null; plays: number | null }>(
-  points: T[],
-): T[] {
-  let f: number | null = null;
-  let l: number | null = null;
-  let p: number | null = null;
-  return points.map((point) => {
-    f = point.followers ?? f;
-    l = point.likes ?? l;
-    p = point.plays ?? p;
-    return { ...point, followers: f, likes: l, plays: p };
-  });
 }
 
 export { METRIC_NAMES };

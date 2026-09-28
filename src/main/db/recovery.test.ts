@@ -25,7 +25,7 @@ it("makes a verified pre-migration SQLite snapshot including WAL changes", () =>
     old.exec("CREATE TABLE synthetic_recovery_marker(value TEXT); INSERT INTO synthetic_recovery_marker VALUES('saved-before-upgrade')");
     const upgraded = openDatabase(file);
     try {
-      expect(upgraded.get("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(17);
+      expect(upgraded.get("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(MIGRATIONS.at(-1)!.version);
       const files = fs.readdirSync(path.join(directory, "recovery-points")); expect(files).toHaveLength(1);
       const snapshot = new DatabaseSync(path.join(directory, "recovery-points", files[0]), { readOnly: true });
       try {

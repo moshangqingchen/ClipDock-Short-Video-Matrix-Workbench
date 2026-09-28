@@ -16,6 +16,9 @@ import {
   worksToMetrics,
   worksJson,
   recordWorksPage,
+  finishWorksPage,
+  withIdentityProfile,
+  businessResponseAllowsData,
   type Collector,
   type CollectorContext,
   type CollectorProfile,
@@ -25,7 +28,8 @@ import {
 const BASE = "https://baijiahao.baidu.com";
 
 function ok(json: any): boolean {
-  return (pick(json, "errno") === 0 || pick(json, "errno") === "0") && Boolean(pick(json, "data"));
+  return businessResponseAllowsData(json, "baijiahao") &&
+    (pick(json, "errno") === 0 || pick(json, "errno") === "0") && Boolean(pick(json, "data"));
 }
 
 async function readProfile(ctx: CollectorContext): Promise<CollectorProfile | null> {
@@ -90,6 +94,7 @@ async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work
   recordWorksPage(ctx, json, list, "page", []);
   return list
     .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return null;
       const remoteId = String(firstDefined(item, ["article_id", "id", "nid"]) ?? "");
       if (!remoteId) return null;
       return makeWork(
@@ -128,14 +133,12 @@ export const baijiahaoCollector: Collector = {
     const result = emptyResult();
     const capturedAt = new Date().toISOString();
     let profile = ctx.skipProfile ? null : await readProfile(ctx);
-    if (!ctx.skipProfile) profile = completeProfile(profile, await domScrapeNumbers(ctx.webContents, DEFAULT_LABELS), result.warnings);
+    if (!ctx.skipProfile) profile = completeProfile(withIdentityProfile(profile, ctx.identityProfile), await domScrapeNumbers(ctx.webContents, DEFAULT_LABELS), result.warnings);
     const fetchedWorks = await readWorks(ctx, capturedAt);
-    if (fetchedWorks === null) result.warnings.push("作品接口不可用");
     const works = fetchedWorks ?? [];
     result.profile = profile;
     result.works = works;
-    result.page = ctx.pageResult;
-    if (result.page?.hasMore === null) result.warnings.push(result.page.reason ?? "分页范围未确认");
+    result.page = finishWorksPage(ctx, fetchedWorks, result.warnings);
     result.metrics = [
       ...(profile ? profileToMetrics(ctx.account, profile, capturedAt) : []),
       ...worksToMetrics(works, capturedAt),

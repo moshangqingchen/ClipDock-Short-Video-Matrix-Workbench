@@ -24,3 +24,23 @@ it("recognizes a labelled statistics period while rejecting duplicate metric lab
   document.body.innerHTML = '<p>统计周期：2026-09-01 至 2026-09-07</p><div><span>完播率</span><b>25%</b></div><div><span>完播率</span><b>40%</b></div>';
   expect(read()).toMatchObject({ dates: ["2026-09-01", "2026-09-07"], cards: [] });
 });
+it("reads a bounded nested card and slash/Chinese date inputs", () => {
+  document.body.innerHTML = '<input value="2026/9/1"><input value="2026年9月7日"><section><div><span>平均观看时长</span></div><div><strong>30 秒</strong></div></section>';
+  expect(read()).toMatchObject({ dates: ["2026-09-01", "2026-09-07"], cards: [{ label: "平均观看时长", text: "30 秒" }] });
+});
+it("never chooses a hidden metric or another card's value", () => {
+  document.body.innerHTML = '<input value="2026-09-01"><div hidden><span>完播率</span><b>99%</b></div><section><div><span>完播率</span></div><div><span>平均观看时长</span><b>30 秒</b></div></section>';
+  expect(read().cards.some((card) => card.label === "完播率")).toBe(false);
+});
+it("does not turn a comparison percentage into a completion rate", () => {
+  document.body.innerHTML = '<input value="2026-09-01"><div><span>完播率</span><div>环比 <b>25%</b></div></div>';
+  expect(read().cards).toEqual([]);
+});
+it("does not combine tables from different distributions in a shared section", () => {
+  document.body.innerHTML = '<input value="2026-09-01"><section><h3>粉丝性别</h3><table><tr><td>男</td><td>60%</td></tr><tr><td>女</td><td>40%</td></tr></table><h3>粉丝年龄</h3><table><tr><td>18-24</td><td>70%</td></tr><tr><td>25-34</td><td>30%</td></tr></table></section>';
+  expect(read().groups).toEqual([]);
+});
+it("reads distinct labelled regions without merging their count or ratio units", () => {
+  document.body.innerHTML = '<input value="2026-09-01"><section><h3>粉丝性别</h3><table><tr><td>男</td><td>60%</td></tr></table></section><section><h3>粉丝年龄</h3><table><tr><td>18-24</td><td>70 人</td></tr></table></section>';
+  expect(read().groups).toMatchObject([{ dimension: "粉丝性别", entries: [{ label: "男", text: "60%" }] }, { dimension: "粉丝年龄", entries: [{ label: "18-24", text: "70 人" }] }]);
+});

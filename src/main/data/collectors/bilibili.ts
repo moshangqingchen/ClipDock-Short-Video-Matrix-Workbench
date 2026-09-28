@@ -13,6 +13,8 @@ import {
   worksToMetrics,
   worksJson,
   recordWorksPage,
+  finishWorksPage,
+  withIdentityProfile,
   type Collector,
   type CollectorContext,
   type CollectorProfile,
@@ -21,6 +23,16 @@ import {
 
 const API = "https://api.bilibili.com";
 const MEMBER = "https://member.bilibili.com";
+
+/** Some empty-account responses use null. Only an explicit successful zero total proves emptiness. */
+function worksList(json: unknown): unknown[] | null {
+  if (pick(json, "code") !== 0) return null;
+  const list = pick(json, "data.arc_audits");
+  if (Array.isArray(list)) return list;
+  const totals = ["data.page.count", "data.total", "data.total_count", "data.totalCount", "total", "total_count"]
+    .map(path => pick(json, path)).filter((value) => value !== undefined);
+  return list === null && totals.length > 0 && totals.every((value) => value === 0 || value === "0") ? [] : null;
+}
 
 async function readProfile(ctx: CollectorContext): Promise<CollectorProfile | null> {
   const nav = await firstJson(
@@ -61,13 +73,14 @@ async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work
       { url: `${MEMBER}/x/web/archives?status=is_pubing,pubed,not_pubed&pn=${ctx.progress?.page ?? 1}&ps=30&coop=1&interactive=1` },
       { url: `${MEMBER}/x/web/archives?status=pubed&pn=${ctx.progress?.page ?? 1}&ps=30` },
     ],
-    (j) => pick(j, "code") === 0 && Array.isArray(pick(j, "data.arc_audits")),
+    (j) => worksList(j) !== null,
   );
   if (!json) return null;
-  const list = pick(json, "data.arc_audits") as any[];
+  const list = worksList(json) as any[];
   recordWorksPage(ctx, json, list, "page", []);
   return list
     .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return null;
       const archive = item.Archive ?? item.archive ?? {};
       const stat = item.stat ?? {};
       const remoteId = String(archive.bvid ?? archive.aid ?? "");
@@ -119,14 +132,13 @@ export const bilibiliCollector: Collector = {
       }
       throw error;
     }
+    if (!ctx.skipProfile) profile = withIdentityProfile(profile, ctx.identityProfile);
     if (!ctx.skipProfile && !profile) result.warnings.push("无法读取账号概览");
     const fetchedWorks = await readWorks(ctx, capturedAt);
-    if (fetchedWorks === null) result.warnings.push("作品接口不可用");
     const works = fetchedWorks ?? [];
     result.profile = profile;
     result.works = works;
-    result.page = ctx.pageResult;
-    if (result.page?.hasMore === null) result.warnings.push(result.page.reason ?? "分页范围未确认");
+    result.page = finishWorksPage(ctx, fetchedWorks, result.warnings);
     result.metrics = [
       ...(profile ? profileToMetrics(ctx.account, profile, capturedAt) : []),
       ...worksToMetrics(works, capturedAt),

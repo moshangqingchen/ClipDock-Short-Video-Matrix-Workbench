@@ -10,7 +10,7 @@ import type {
   Work,
   WorkDto,
 } from "@shared/types";
-import { WORK_METRICS } from "@shared/types";
+import { METRIC_NAMES, WORK_METRICS } from "@shared/types";
 
 export type MediaProjectionSubject =
   { accountId: string; kind: "avatar" } | { accountId: string; kind: "cover"; workId: string };
@@ -94,6 +94,7 @@ export function createMediaProjection<Mode extends MediaProjectionMode>(
     ({
       platformId: platform.platformId,
       ...(platform.coverage ? { coverage: { ...platform.coverage } } : {}),
+      ...(platform.dayCoverage ? { dayCoverage: { ...platform.dayCoverage } } : {}),
       accountCount: platform.accountCount,
       onlineCount: platform.onlineCount,
       totals: { ...platform.totals },
@@ -106,6 +107,12 @@ export function createMediaProjection<Mode extends MediaProjectionMode>(
         metrics: structuredClone(account.metrics),
         capturedAt: account.capturedAt,
         spark: [...account.spark],
+        ...(account.lastRun ? { lastRun: {
+          id: account.lastRun.id, accountId: account.lastRun.accountId, platformId: account.lastRun.platformId,
+          startedAt: account.lastRun.startedAt, finishedAt: account.lastRun.finishedAt, status: account.lastRun.status,
+          trigger: account.lastRun.trigger, message: account.lastRun.message,
+          metricsWritten: account.lastRun.metricsWritten, worksWritten: account.lastRun.worksWritten,
+        } } : {}),
       })),
     }) as PlatformSummaryDto<Mode>;
 
@@ -115,8 +122,14 @@ export function createMediaProjection<Mode extends MediaProjectionMode>(
     attentionCount: overview.attentionCount,
     totals: { ...overview.totals },
     dayDelta: { ...overview.dayDelta },
+    ...(overview.coverage ? { coverage: { ...overview.coverage } } : {}),
+    ...(overview.dayCoverage ? { dayCoverage: { ...overview.dayCoverage } } : {}),
     platforms: overview.platforms.map(projectPlatformSummary),
-    trend: overview.trend.map(({ date, followers, likes, plays }) => ({ date, followers, likes, plays })),
+    trend: overview.trend.map((point) => ({
+      date: point.date, followers: point.followers, likes: point.likes, plays: point.plays,
+      ...Object.fromEntries(METRIC_NAMES.filter((key) => point[key] !== undefined).map((key) => [key, point[key]])),
+      ...(point.coverage ? { coverage: Object.fromEntries(METRIC_NAMES.filter((key) => point.coverage?.[key] !== undefined).map((key) => [key, point.coverage![key]])) } : {}),
+    })),
     attention: overview.attention.map(({ accountId, displayName, platformId, status, message }) => ({
       accountId,
       displayName,

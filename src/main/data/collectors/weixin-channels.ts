@@ -13,6 +13,8 @@ import {
   worksToMetrics,
   worksJson,
   recordWorksPage,
+  finishWorksPage,
+  withIdentityProfile,
   type Collector,
   type CollectorContext,
   type CollectorProfile,
@@ -53,6 +55,7 @@ async function readWorks(ctx: CollectorContext, fetchedAt: string): Promise<Work
   recordWorksPage(ctx, json, list, "page", []);
   return list
     .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return null;
       const remoteId = String(firstDefined(item, ["objectId", "exportId", "id"]) ?? "");
       if (!remoteId) return null;
       return makeWork(
@@ -106,13 +109,12 @@ export const weixinChannelsCollector: Collector = {
       }
       throw error;
     }
+    if (!ctx.skipProfile) profile = withIdentityProfile(profile, ctx.identityProfile);
     if (!ctx.skipProfile && !profile) result.warnings.push("无法读取账号概览");
-    if (fetchedWorks === null) result.warnings.push("作品接口不可用");
     const works = fetchedWorks ?? [];
     result.profile = profile;
     result.works = works;
-    result.page = ctx.pageResult;
-    if (result.page?.hasMore === null) result.warnings.push(result.page.reason ?? "分页范围未确认");
+    result.page = finishWorksPage(ctx, fetchedWorks, result.warnings);
     result.metrics = [
       ...(profile ? profileToMetrics(ctx.account, profile, capturedAt) : []),
       ...worksToMetrics(works, capturedAt),

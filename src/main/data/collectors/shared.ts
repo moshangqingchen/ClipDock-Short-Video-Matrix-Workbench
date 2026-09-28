@@ -2,7 +2,8 @@ import type { WebContents } from "electron";
 import { randomUUID } from "node:crypto";
 import type { CollectionProgress } from "@shared/collect-jobs";
 import { WORK_METRICS, type Account, type MetricName, type MetricSnapshot, type Work, type WorkMetric, type MetricOrigin } from "@shared/types";
-import type { PlatformId } from "@shared/platforms";
+import { CN_PLATFORM_IDS, type PlatformId } from "@shared/platforms";
+import { getOperationSourceInventory } from "@main/network/operation-catalog";
 import type { ProfileInfo } from "@main/services/account-service";
 import { evaluateWithLease } from "@main/network/page-evaluation";
 import {
@@ -56,17 +57,42 @@ export interface WorkPageInfo {
 
 /** Keep the selected API variant stable across pages; a new variant may use different cursors. */
 export async function worksJson(ctx: CollectorContext, candidates: Parameters<typeof firstJson>[1], accept: (json: any) => boolean): Promise<any> {
+  ctx.pageResult = undefined;
   const variant = ctx.progress?.variant;
   const indexes = variant === undefined ? candidates.map((_, i) => i) : [variant];
   for (const index of indexes) {
     if (!candidates[index]) continue;
-    const json = await firstJson(ctx.webContents, [candidates[index]], accept);
+    const json = await firstJson(ctx.webContents, [candidates[index]],
+      (value) => businessResponseAllowsData(value, ctx.account.platformId) && accept(value));
     if (json) {
       ctx.pageResult = { nextPage: (ctx.progress?.page ?? 1) + 1, nextCursor: "", hasMore: null, variant: index };
       return json;
     }
   }
   return null;
+}
+
+/** An absent business marker keeps legacy schema compatibility; an explicit failure never does. */
+export function businessResponseAllowsData(json: unknown, platform: PlatformId): boolean {
+  if (!json || typeof json !== "object" || Array.isArray(json)) return false;
+  if (pick(json, "success") === false || pick(json, "data.success") === false) return false;
+  for (const field of BUSINESS_CODE_FIELDS) {
+    if (field === "result" && platform !== "kuaishou") continue;
+    const value = pick(json, field);
+    if (value === undefined) continue;
+    if (integerCode(value) !== (field === "result" && platform === "kuaishou" ? 1 : 0)) return false;
+  }
+  return true;
+}
+
+/** One failure reason is shared with the scheduler, which deduplicates warnings with a Set. */
+export function finishWorksPage(ctx: CollectorContext, works: Work[] | null, warnings: string[]): WorkPageInfo | undefined {
+  if (works === null && !ctx.pageResult) ctx.pageResult = {
+    nextPage: ctx.progress?.page ?? 1, nextCursor: ctx.progress?.cursor ?? "", hasMore: null,
+    reason: "作品接口不可用，已保留已有作品；请查看采集诊断",
+  };
+  if (ctx.pageResult?.hasMore === null) warnings.push(ctx.pageResult.reason ?? "分页范围未确认");
+  return ctx.pageResult;
 }
 export function recordWorksPage(ctx: CollectorContext, json: unknown, list: unknown[], kind: "page" | "cursor", cursorPaths: string[] = []): void {
   const total = toNumber(firstDefined(json, ["data.totalCount", "data.total_count", "data.total", "total", "total_count", "data.page.count"]));
@@ -77,6 +103,12 @@ export function recordWorksPage(ctx: CollectorContext, json: unknown, list: unkn
   if (list.length === 0 && hasMore === true) {
     ctx.pageResult = { ...ctx.pageResult, receivedCount: 0, nextPage: ctx.progress?.page ?? 1, nextCursor: ctx.progress?.cursor ?? "", hasMore: null,
       reason: "平台返回空页但仍声明存在后续作品，请重新核对分页" };
+    return;
+  }
+  const knownTotal = total ?? ctx.progress?.total;
+  if (list.length === 0 && knownTotal != null && knownTotal > (ctx.progress?.worksSeen ?? 0)) {
+    ctx.pageResult = { ...ctx.pageResult, receivedCount: 0, nextPage: ctx.progress?.page ?? 1, nextCursor: ctx.progress?.cursor ?? "", hasMore: null,
+      total: knownTotal, reason: "平台返回空页，但已读取作品数未达到声明总数，请在官方作品页复核" };
     return;
   }
   if (list.length === 0 && hasMore !== true) hasMore = false;
@@ -104,11 +136,55 @@ export interface PageResponse {
   text: string;
   url: string;
 }
-let diagnosticSink: ((entry: { accountId: string; stage: "request" | "response"; code: string; status?: number }) => void) | undefined;
+const BUSINESS_CODE_FIELDS = ["code", "status_code", "errno", "errCode", "errcode", "error_code", "errorCode", "result", "base_resp.ret", "baseResponse.errCode"] as const;
+const DIAGNOSTIC_FIELDS = ["data", "aweme_list", "data.aweme_list", "item_list", "data.list", "list", "data.photoList", "data.notes", "data.items", "data.arc_audits", "data.page.count", "data.total", "data.total_count"] as const;
+type FieldType = "missing" | "null" | "array" | "object" | "string" | "number" | "boolean" | "other";
+export interface CollectorDiagnostic {
+  accountId: string;
+  stage: "request" | "response";
+  code: string;
+  status?: number;
+  endpoint?: string;
+  businessCode?: number;
+  businessCodeField?: typeof BUSINESS_CODE_FIELDS[number];
+  fieldTypes?: Partial<Record<typeof DIAGNOSTIC_FIELDS[number], FieldType>>;
+}
+// Only source-owned collector endpoints can be emitted. A redirect, account path,
+// unknown URL, query, response text and arbitrary response key never enter the log.
+const DIAGNOSTIC_ENDPOINTS = new Set(CN_PLATFORM_IDS.flatMap((platform) =>
+  getOperationSourceInventory(platform).collectorRequests.map(({ urlTemplate }) => {
+    const url = new URL(urlTemplate); return url.origin + url.pathname;
+  })));
+function integerCode(value: unknown): number | null {
+  const number = typeof value === "string" && /^-?\d{1,9}$/.test(value) ? Number(value) : value;
+  return typeof number === "number" && Number.isSafeInteger(number) && Math.abs(number) <= 1_000_000_000 ? number : null;
+}
+function diagnosticDetails(address: string | undefined, json?: unknown): Partial<CollectorDiagnostic> {
+  const details: Partial<CollectorDiagnostic> = {};
+  try {
+    const url = new URL(address ?? "");
+    const endpoint = url.origin + url.pathname;
+    if (!url.username && !url.password && DIAGNOSTIC_ENDPOINTS.has(endpoint)) details.endpoint = endpoint;
+  } catch { /* Unknown paths are omitted rather than copied into diagnostics. */ }
+  if (json && typeof json === "object" && !Array.isArray(json)) {
+    const codes = BUSINESS_CODE_FIELDS.map((field) => ({ field, value: integerCode(pick(json, field)) }))
+      .filter((item): item is { field: typeof BUSINESS_CODE_FIELDS[number]; value: number } => item.value !== null);
+    const code = codes.find((item) => item.value !== 0) ?? codes[0];
+    if (code) { details.businessCode = code.value; details.businessCodeField = code.field; }
+    details.fieldTypes = {};
+    for (const field of DIAGNOSTIC_FIELDS) {
+      const value = pick(json, field), type = typeof value;
+      details.fieldTypes[field] = value === undefined ? "missing" : value === null ? "null" : Array.isArray(value) ? "array"
+        : type === "object" || type === "string" || type === "number" || type === "boolean" ? type : "other";
+    }
+  }
+  return details;
+}
+let diagnosticSink: ((entry: CollectorDiagnostic) => void) | undefined;
 export function setCollectorDiagnosticSink(sink: typeof diagnosticSink): void { diagnosticSink = sink; }
-function requestDiagnostic(wc: WebContents, stage: "request" | "response", code: string, status?: number): void {
+function requestDiagnostic(wc: WebContents, stage: "request" | "response", code: string, status?: number, address?: string, json?: unknown): void {
   if (!diagnosticSink) return;
-  try { diagnosticSink({ accountId: accountForWebContents(wc), stage, code, ...(status == null ? {} : { status }) }); } catch { /* best effort */ }
+  try { diagnosticSink({ accountId: accountForWebContents(wc), stage, code, ...(status == null ? {} : { status }), ...diagnosticDetails(address, json) }); } catch { /* best effort */ }
 }
 
 export class RateLimitedError extends Error {
@@ -191,7 +267,7 @@ export async function pageFetch(
     return result;
   } catch (error) {
     cancel();
-    requestDiagnostic(wc, "request", error instanceof Error && error.message === "page-evaluation-timeout" ? "TIMEOUT" : "INTERRUPTED");
+    requestDiagnostic(wc, "request", error instanceof Error && error.message === "page-evaluation-timeout" ? "TIMEOUT" : "INTERRUPTED", undefined, targetUrl);
     operation.assertCurrent();
     throw error;
   } finally {
@@ -227,10 +303,12 @@ export async function firstJson<T = any>(
   for (const candidate of candidates) {
     try {
       const { json, status } = await pageJson<any>(wc, candidate.url, candidate.init);
-      if (status === 401) throw new LoggedOutError();
-      if (json && [300330, 300333, 300334].includes(Number(pick(json, "errCode")))) throw new LoggedOutError();
+      if (status === 401 || json && [300330, 300333, 300334].includes(Number(pick(json, "errCode")))) {
+        requestDiagnostic(wc, "response", "LOGIN_REQUIRED", status, candidate.url, json);
+        throw new LoggedOutError();
+      }
       if (status >= 200 && status < 300 && json && accept(json)) return json as T;
-      requestDiagnostic(wc, "response", status >= 400 ? "HTTP_ERROR" : json ? "SCHEMA_MISMATCH" : "INVALID_JSON", status);
+      requestDiagnostic(wc, "response", status >= 400 ? "HTTP_ERROR" : status === 0 ? "NETWORK_ERROR" : json ? "SCHEMA_MISMATCH" : "INVALID_JSON", status, candidate.url, json);
     } catch (error) {
       if (
         error instanceof RateLimitedError ||
@@ -328,30 +406,55 @@ export async function domScrapeNumbers(
 ): Promise<Partial<Record<MetricName, number>>> {
   if (wc.isDestroyed()) return {};
   const operation = beginBusinessOperation(accountForWebContents(wc));
-  const script = `
+  const script = String.raw`
     (() => {
       const labels = ${JSON.stringify(labels)};
       const out = {};
-      const numberPattern = /^\\s*-?\\d[\\d,.]*\\s*(万|亿|w|W|k|K)?\\s*$/;
-      const nodes = Array.from(document.querySelectorAll("body *")).filter((el) => el.children.length === 0 && el.textContent && el.textContent.trim().length <= 12);
-      const textOf = (el) => (el.textContent || "").trim();
+      const numberPattern = /^\d[\d,]*(?:\.\d+)?\s*(万|亿|w|W|k|K|m|M)?$/;
+      const periodPattern = /今日|今天|昨日|昨天|本周|上周|本月|上月|今年|去年|本年度|近\s*\d+\s*[天日周月年]|过去\s*\d+\s*[天日周月年]|最近|自定义|\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}/;
+      const textOf = (el) => (el.textContent || "").replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        if (el.closest('[hidden],[aria-hidden="true"],[inert]') || !el.getClientRects().length) return false;
+        const style = getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse';
+      };
+      const allNodes = document.querySelectorAll("body *");
+      // A truncated scan cannot establish uniqueness; leave values unavailable.
+      if (allNodes.length > 20000) return out;
+      const nodes = Array.from(allNodes)
+        .filter(el => !el.children.length && textOf(el).length <= 48 && visible(el));
+      const hasPeriod = nodes.some(el => periodPattern.test(textOf(el)));
+      const excluded = el => el.closest('tr,[role=row],a,button,[role=button],nav');
+      const allNames = Object.values(labels).flat();
+      const isLabel = el => allNames.some(name => textOf(el) === name || textOf(el).startsWith(name + ':') || textOf(el).startsWith(name + '：') || textOf(el).startsWith(name + ' '));
       for (const [metric, names] of Object.entries(labels)) {
-        const matches = nodes.filter(el => names.includes(textOf(el)) && !el.closest('tr,[role=row],a,button'));
-        if (matches.length !== 1) continue;
-        for (const el of matches) {
-          const text = textOf(el);
-          if (!names.includes(text)) continue;
-          const candidates = [];
-          let scope = el.parentElement;
-          for (let depth = 0; depth < 3 && scope; depth += 1, scope = scope.parentElement) {
-            if (/今日|昨日|近\\s*\\d+\\s*天|过去\\s*\\d+\\s*天/.test(scope.textContent || '')) break;
-            candidates.push(...Array.from(scope.querySelectorAll("*")).filter((c) => c !== el && c.children.length === 0));
-            if (candidates.some(c => numberPattern.test(textOf(c)))) break;
+        const matches = [];
+        const sortedNames = [...names].sort((a, b) => b.length - a.length);
+        for (const el of nodes) {
+          if (excluded(el)) continue;
+          const text = textOf(el), name = sortedNames
+            .find(name => text === name || text.startsWith(name + ':') || text.startsWith(name + '：') || text.startsWith(name + ' '));
+          if (!name) continue;
+          const cumulative = /累计|总/.test(name);
+          if (hasPeriod && !cumulative) continue;
+          const inline = text.slice(name.length).replace(/^[:：\s]+/, '');
+          let number = numberPattern.test(inline) ? inline : null;
+          if (!number && text !== name) continue;
+          let scope = el.parentElement, invalid = false;
+          for (let depth = 0; depth < 3 && scope && scope !== document.body; depth += 1, scope = scope.parentElement) {
+            const children = nodes.filter(node => scope.contains(node));
+            if (children.some(node => periodPattern.test(textOf(node)))) { invalid = true; break; }
+            if (number) break;
+            // Never pair a missing metric with the value in a neighboring card.
+            if (children.some(node => node !== el && isLabel(node))) { invalid = true; break; }
+            const numbers = children.filter(node => node !== el && !excluded(node) && numberPattern.test(textOf(node)));
+            if (numbers.length) { number = numbers.length === 1 ? textOf(numbers[0]) : null; break; }
           }
-          const numbers = candidates.filter((c) => numberPattern.test(textOf(c)));
-          const hit = numbers.length === 1 ? numbers[0] : null;
-          if (hit) { out[metric] = textOf(hit); break; }
+          if (number && !invalid) matches.push({ number, cumulative });
         }
+        const totals = matches.filter(item => item.cumulative);
+        const candidates = totals.length ? totals : matches;
+        if (candidates.length === 1) out[metric] = candidates[0].number;
       }
       return out;
     })()
@@ -375,15 +478,36 @@ export async function domScrapeNumbers(
 }
 
 export const DEFAULT_LABELS: Record<MetricName, string[]> = {
-  followers: ["粉丝", "粉丝数", "粉丝量", "关注者"],
-  following: ["关注", "关注数"],
-  likes: ["获赞", "点赞", "获赞数", "赞", "点赞量"],
-  comments: ["评论", "评论数", "评论量"],
-  plays: ["播放", "播放量", "总播放", "阅读", "浏览量"],
-  shares: ["分享", "转发", "分享量"],
-  favorites: ["收藏", "收藏量"],
-  works: ["作品", "作品数", "视频", "视频数", "笔记"],
+  followers: ["粉丝", "粉丝数", "粉丝量", "关注者", "总粉丝数", "粉丝总数"],
+  following: ["关注", "关注数", "总关注数"],
+  likes: ["获赞", "点赞", "获赞数", "赞", "点赞量", "累计获赞", "累计点赞", "总获赞", "总点赞量"],
+  comments: ["评论", "评论数", "评论量", "累计评论", "累计评论量", "总评论数"],
+  plays: ["播放", "播放量", "总播放", "阅读", "阅读量", "浏览量", "累计播放", "累计播放量", "总播放量", "累计阅读量", "总阅读量", "总浏览量"],
+  shares: ["分享", "转发", "分享量", "累计分享", "累计分享量", "总分享量", "总转发量"],
+  favorites: ["收藏", "收藏量", "累计收藏", "累计收藏量", "总收藏数"],
+  works: ["作品", "作品数", "视频", "视频数", "笔记", "作品总数", "总作品数", "视频总数", "笔记总数"],
 };
+
+/** Fill only absent fields from the scheduler's verified live identity projection. */
+export function withIdentityProfile(profile: CollectorProfile | null, identity?: CollectorProfile | null): CollectorProfile | null {
+  if (!identity) return profile;
+  const merged = { ...identity, ...profile, origins: { ...identity.origins, ...profile?.origins } };
+  for (const key of ["displayName", "avatarUrl", "handle", "externalId", ...Object.keys(DEFAULT_LABELS)] as const) {
+    if (profile?.[key as keyof CollectorProfile] == null && identity[key as keyof CollectorProfile] != null) {
+      Object.assign(merged, { [key]: identity[key as keyof CollectorProfile] });
+      if (key in DEFAULT_LABELS) {
+        const metric = key as MetricName;
+        if (identity.origins?.[metric]) merged.origins[metric] = identity.origins[metric];
+        else delete merged.origins[metric];
+      }
+    } else if (key in DEFAULT_LABELS && profile?.[key as keyof CollectorProfile] != null) {
+      const metric = key as MetricName;
+      if (profile.origins?.[metric]) merged.origins[metric] = profile.origins[metric];
+      else delete merged.origins[metric];
+    }
+  }
+  return merged;
+}
 
 export function completeProfile(profile: CollectorProfile | null, scraped: Partial<Record<MetricName, number>>, warnings: string[]): CollectorProfile | null {
   const names = Object.keys(DEFAULT_LABELS) as MetricName[];

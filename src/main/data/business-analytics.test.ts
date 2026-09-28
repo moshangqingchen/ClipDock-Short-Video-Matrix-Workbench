@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createStore, type Store } from "@main/db";
 import { CN_PLATFORM_IDS, getPlatform } from "@shared/platforms";
 import { analyticsRecordSchema, type AnalyticsRecord } from "@shared/business-analytics";
-import { analyticsPageAllowed, parseAnalyticsPage, parseDuration, parseRate, type AnalyticsPageSample } from "./business-analytics-page";
+import { analyticsPageAllowed, parseAnalyticsPage, parseDistributionValue, parseDuration, parseRate, type AnalyticsPageSample } from "./business-analytics-page";
 import { BusinessAnalyticsRepository } from "./business-analytics-repository";
 import { makeWork } from "./collectors/shared";
 import { applyBackup, buildBackup } from "@main/security/backup";
@@ -24,6 +24,21 @@ const sample: AnalyticsPageSample = {
   ],
 };
 describe("business analytics evidence and units", () => {
+  it("retains explicit audience/traffic count units and rejects mixed or absent units", () => {
+    const account = open().accounts.create({ platformId: "bilibili" });
+    const groups = [
+      { dimension: "粉丝年龄", dates: [], entries: [{ label: "18-24", text: "1.2万人" }, { label: "25-30", text: "0 人" }] },
+      { dimension: "播放来源", dates: [], entries: [{ label: "推荐", text: "2,000 次" }] },
+    ];
+    const result = parseAnalyticsPage(account, { ...sample, cards: [], groups });
+    expect(result.records.map((record) => record.data)).toEqual([
+      { kind: "distribution", dimension: "粉丝年龄", entries: [{ label: "18-24", value: 12000 }, { label: "25-30", value: 0 }], unit: "people" },
+      { kind: "distribution", dimension: "播放来源", entries: [{ label: "推荐", value: 2000 }], unit: "views" },
+    ]);
+    for (const text of ["2000", "1,2 人", "-1 人", "0.5 人", "99人（环比+1）"]) expect(parseDistributionValue(text)).toBeNull();
+    const mixed = { ...groups[0], entries: [{ label: "a", text: "20%" }, { label: "b", text: "30 人" }] };
+    expect(parseAnalyticsPage(account, { ...sample, cards: [], groups: [mixed] }).records).toEqual([]);
+  });
   it.each(CN_PLATFORM_IDS)("%s retains the official range and separates estimates from settlement", (platformId) => {
     const account = open().accounts.create({ platformId });
     const parsed = parseAnalyticsPage(account, sample);

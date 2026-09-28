@@ -140,7 +140,7 @@
 }
 .platformStats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
 }
 .platformStat span {
@@ -224,3 +224,9 @@
   margin-right: 5px;
   vertical-align: -1px;
 }
+.notice { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px; margin: 12px 0; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-sunken); font-size: var(--text-sm); }
+.platformStat small { display: block; color: var(--fg-subtle); font-size: 10px; }
+.cardHead { flex-wrap: wrap; }
+.cardHead label { color: var(--fg-muted); font-size: var(--text-sm); }
+.cardHead select { padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-elev); color: var(--fg); }
+@media (max-width: 900px) { .platformGrid { grid-template-columns: 1fr; } }

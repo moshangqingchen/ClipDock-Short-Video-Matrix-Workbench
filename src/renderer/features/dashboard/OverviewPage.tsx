@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { PlatformLogo } from "@renderer/components/ui/PlatformLogo";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
@@ -12,9 +12,11 @@ import {
   UserPlus,
   Users,
   UsersRound,
+  Bookmark,
+  Film,
 } from "lucide-react";
 import { PLATFORMS } from "@shared/platforms";
-import type { OverviewView } from "@shared/types";
+import { METRIC_NAMES, type MetricName } from "@shared/types";
 import {
   Avatar,
   Button,
@@ -32,32 +34,25 @@ import layout from "@renderer/features/layout/layout.module.css";
 import styles from "./dashboard.module.css";
 import { CollectQueue } from "@renderer/features/metrics/CollectQueue";
 import { showCollectAccepted } from "@renderer/features/metrics/collect-feedback";
+import { METRIC_LABELS } from "@renderer/features/metrics/metric-presentation";
+import { useMetricResource } from "@renderer/features/metrics/use-metric-resource";
+
+const METRIC_STYLE = {
+  followers: { icon: Users, color: "var(--brand-500)" }, following: { icon: UserPlus, color: "#14b8a6" },
+  likes: { icon: Heart, color: "#ec4899" }, comments: { icon: MessageCircle, color: "#f59e0b" },
+  plays: { icon: Eye, color: "#0ea5e9" }, shares: { icon: Share2, color: "#8b5cf6" },
+  favorites: { icon: Bookmark, color: "#f97316" }, works: { icon: Film, color: "#64748b" },
+};
 
 export function OverviewPage() {
-  const [data, setData] = useState<OverviewView | null>(null);
+  const { data, loading, error, retry } = useMetricResource(useCallback(() => api.metrics.overview(30), []));
   const [collecting, setCollecting] = useState(false);
+  const [trendMetric, setTrendMetric] = useState<MetricName>("followers");
   const accounts = useAccounts((s) => s.accounts);
   const openAccount = useUi((s) => s.openAccount);
   const setRoute = useUi((s) => s.setRoute);
   const setMetricsPlatform = useUi((s) => s.setMetricsPlatform);
   const setAddAccountOpen = useUi((s) => s.setAddAccountOpen);
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = () =>
-      api.metrics
-        .overview(30)
-        .then((d) => !cancelled && setData(d))
-        .catch(() => undefined);
-    void load();
-    const off = api.on("metrics-updated", () => void load());
-    const off2 = api.on("account-changed", () => void load());
-    return () => {
-      cancelled = true;
-      off();
-      off2();
-    };
-  }, [accounts.length]);
 
   const collectAll = async () => {
     setCollecting(true);
@@ -79,7 +74,7 @@ export function OverviewPage() {
         <div>
           <span className={layout.eyebrow}>OVERVIEW</span>
           <h1>总览</h1>
-          <p>所有平台账号的实时状态与数据汇总。同平台数据可相加,跨平台仅作展示。</p>
+          <p>查看各平台账号状态和已取得的 8 项基础指标。跨平台总数仅供概览，不代表统一统计口径。</p>
         </div>
         <div className={layout.pageActions}>
           <Button icon={RefreshCw} loading={collecting} onClick={collectAll} disabled={accounts.length === 0}>
@@ -92,6 +87,8 @@ export function OverviewPage() {
       </div>
 
       <CollectQueue />
+      {error && <div role="alert" className={styles.notice}><span>总览读取失败。{data ? "已保留上次结果。" : "请重试读取本地数据。"}</span><Button size="sm" onClick={retry}>重试读取</Button></div>}
+      {data && !data.accountCount && <div role="status" className={styles.notice}>还没有账号。添加并登录账号后，可通过「全部采集」读取数据。</div>}
       <h3 className={styles.rowTitle}>全部数据</h3>
       <div className={cx(styles.kpiRow, styles.kpiRow5)}>
         <Kpi
@@ -100,75 +97,19 @@ export function OverviewPage() {
           value={data?.accountCount}
           sub={data ? `${data.onlineCount} 在线 · ${data.attentionCount} 需关注` : undefined}
           accent="#6366f1"
-          loading={!data}
+          loading={loading && !data}
         />
-        <Kpi
-          icon={Users}
-          label="总粉丝"
-          value={t.followers}
-          delta={d.followers}
-          accent="var(--brand-500)"
-          loading={!data}
-        />
-        <Kpi icon={Heart} label="总获赞" value={t.likes} delta={d.likes} accent="#ec4899" loading={!data} />
-        <Kpi
-          icon={MessageCircle}
-          label="总评论"
-          value={t.comments}
-          delta={d.comments}
-          accent="#f59e0b"
-          loading={!data}
-        />
-        <Kpi icon={Eye} label="总播放" value={t.plays} delta={d.plays} accent="#0ea5e9" loading={!data} />
+        {METRIC_NAMES.map(metric => <Kpi key={metric} icon={METRIC_STYLE[metric].icon} label={`总${METRIC_LABELS[metric]}`}
+          value={t[metric]} delta={d[metric]} accent={METRIC_STYLE[metric].color} loading={loading && !data}
+          sub={data ? `${data.coverage?.[metric] ?? 0}/${data.accountCount} 个账号有值` : undefined} />)}
       </div>
 
       <h3 className={styles.rowTitle}>今日观测</h3>
       <div className={cx(styles.kpiRow, styles.kpiRow5)}>
-        <Kpi
-          icon={UserPlus}
-          label="今日涨粉"
-          value={d.followers}
-          signed
-          accent="var(--brand-500)"
-          loading={!data}
-          sub="较今日 0 点"
-        />
-        <Kpi
-          icon={Heart}
-          label="今日点赞"
-          value={d.likes}
-          signed
-          accent="#ec4899"
-          loading={!data}
-          sub="较今日 0 点"
-        />
-        <Kpi
-          icon={MessageCircle}
-          label="今日评论"
-          value={d.comments}
-          signed
-          accent="#f59e0b"
-          loading={!data}
-          sub="较今日 0 点"
-        />
-        <Kpi
-          icon={Eye}
-          label="今日播放"
-          value={d.plays}
-          signed
-          accent="#0ea5e9"
-          loading={!data}
-          sub="较今日 0 点"
-        />
-        <Kpi
-          icon={Share2}
-          label="今日分享"
-          value={d.shares}
-          signed
-          accent="#8b5cf6"
-          loading={!data}
-          sub="较今日 0 点"
-        />
+        {METRIC_NAMES.map(metric => <Kpi key={metric} icon={METRIC_STYLE[metric].icon}
+          label={metric === "followers" ? "今日涨粉" : `今日${METRIC_LABELS[metric]}变化`} value={d[metric]} signed
+          accent={METRIC_STYLE[metric].color} loading={loading && !data}
+          sub={data ? `${data.dayCoverage?.[metric] ?? 0}/${data.accountCount} 个账号可比较 · 北京时间 0 点` : undefined} />)}
       </div>
 
       <div className={styles.grid}>
@@ -176,31 +117,20 @@ export function OverviewPage() {
           <div className={styles.cardHead}>
             <div>
               <h3>近 30 天趋势</h3>
-              <p>全部账号粉丝与获赞合计</p>
+              <p>全部账号有值的{METRIC_LABELS[trendMetric]}合计；缺失日期留空</p>
             </div>
-            <div className={styles.legend}>
-              <span>
-                <i style={{ background: "var(--brand-500)" }} />
-                粉丝
-              </span>
-              <span>
-                <i style={{ background: "#ec4899" }} />
-                获赞
-              </span>
-            </div>
+            <label>趋势指标 <select value={trendMetric} onChange={event => setTrendMetric(event.target.value as MetricName)}>
+              {METRIC_NAMES.map(metric => <option key={metric} value={metric}>{METRIC_LABELS[metric]}</option>)}
+            </select></label>
           </div>
           <div style={{ height: 260 }}>
-            {data && data.trend.length > 1 ? (
+            {data && data.trend.some(point => point[trendMetric] != null) ? (
               <ResponsiveContainer>
                 <AreaChart data={data.trend} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
                   <defs>
                     <linearGradient id="ovF" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="0%" stopColor="var(--brand-500)" stopOpacity={0.3} />
                       <stop offset="100%" stopColor="var(--brand-500)" stopOpacity={0} />
-                    </linearGradient>
-                    <linearGradient id="ovL" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#ec4899" stopOpacity={0.25} />
-                      <stop offset="100%" stopColor="#ec4899" stopOpacity={0} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
@@ -213,17 +143,6 @@ export function OverviewPage() {
                     minTickGap={28}
                   />
                   <YAxis
-                    yAxisId="f"
-                    tickFormatter={(v: number) => formatNumber(v)}
-                    tick={{ fontSize: 11, fill: "var(--fg-subtle)" }}
-                    axisLine={false}
-                    tickLine={false}
-                    width={48}
-                    domain={["auto", "auto"]}
-                  />
-                  <YAxis
-                    yAxisId="l"
-                    orientation="right"
                     tickFormatter={(v: number) => formatNumber(v)}
                     tick={{ fontSize: 11, fill: "var(--fg-subtle)" }}
                     axisLine={false}
@@ -238,29 +157,19 @@ export function OverviewPage() {
                       borderRadius: 10,
                       fontSize: 12,
                     }}
-                    formatter={(value, name) => [
+                    formatter={(value, _name, item) => [
                       formatNumber(Number(value), false),
-                      name === "followers" ? "粉丝" : "获赞",
+                      `${METRIC_LABELS[trendMetric]}（${item.payload?.coverage?.[trendMetric] ?? "—"} 个账号有值）`,
                     ]}
                   />
                   <Area
-                    yAxisId="f"
                     type="monotone"
-                    dataKey="followers"
+                    dataKey={trendMetric}
                     stroke="var(--brand-500)"
                     strokeWidth={2}
                     fill="url(#ovF)"
-                    dot={false}
-                    isAnimationActive={false}
-                  />
-                  <Area
-                    yAxisId="l"
-                    type="monotone"
-                    dataKey="likes"
-                    stroke="#ec4899"
-                    strokeWidth={2}
-                    fill="url(#ovL)"
-                    dot={false}
+                    dot={{ r: 2 }}
+                    connectNulls={false}
                     isAnimationActive={false}
                   />
                 </AreaChart>
@@ -275,7 +184,7 @@ export function OverviewPage() {
                   fontSize: "var(--text-sm)",
                 }}
               >
-                {data ? "累计两次以上采集后显示趋势" : <Skeleton height={200} width="100%" />}
+                {loading && !data ? <Skeleton height={200} width="100%" /> : `${METRIC_LABELS[trendMetric]}暂无有效趋势，采集后可在此查看`}
               </div>
             )}
           </div>
@@ -288,9 +197,9 @@ export function OverviewPage() {
               <p>掉线、需验证或即将过期的账号</p>
             </div>
           </div>
-          {!data ? (
+          {!data && loading ? (
             <Skeleton height={120} />
-          ) : data.attention.length === 0 ? (
+          ) : !data ? <p>暂无可用状态，请重试读取总览。</p> : data.attention.length === 0 ? (
             <div className={styles.okState}>
               <CheckCircle2 size={18} />
               所有账号状态正常
@@ -353,9 +262,9 @@ export function OverviewPage() {
                 <ArrowRight size={16} color="var(--fg-subtle)" />
               </div>
               <div className={styles.platformStats}>
-                <Stat label="粉丝" value={platform.totals.followers} delta={platform.dayDelta.followers} />
-                <Stat label="获赞" value={platform.totals.likes} delta={platform.dayDelta.likes} />
-                <Stat label="播放" value={platform.totals.plays} delta={platform.dayDelta.plays} />
+                {METRIC_NAMES.map(metric => <Stat key={metric} label={METRIC_LABELS[metric]}
+                  value={platform.totals[metric]} delta={platform.dayDelta[metric]}
+                  coverage={`${platform.coverage?.[metric] ?? 0}/${platform.accountCount} 个账号有值`} />)}
               </div>
               <div className={styles.platformAccounts}>
                 {platform.accounts.slice(0, 6).map((a) => (
@@ -430,12 +339,13 @@ function Kpi({
   );
 }
 
-function Stat({ label, value, delta }: { label: string; value?: number; delta?: number }) {
+function Stat({ label, value, delta, coverage }: { label: string; value?: number; delta?: number; coverage: string }) {
   return (
     <div className={styles.platformStat}>
       <span>{label}</span>
       <strong className="num">{formatNumber(value)}</strong>
       <Delta value={delta} />
+      <small>{coverage}</small>
     </div>
   );
 }

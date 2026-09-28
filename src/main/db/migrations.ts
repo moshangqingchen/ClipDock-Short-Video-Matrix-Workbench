@@ -434,4 +434,11 @@ export const MIGRATIONS: readonly Migration[] = [
     CREATE TABLE analytics_platforms(platform_id TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)));
     CREATE TABLE analytics_status(account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,states_json TEXT NOT NULL,attempted_at TEXT NOT NULL);`,
   },
+  {
+    version: 18,
+    name: "account-metric-instant-index",
+    sql: `CREATE INDEX idx_account_metric_instant
+      ON metric_snapshots(account_id, metric, julianday(captured_at) DESC, id DESC)
+      WHERE work_id IS NULL;`,
+  },
 ];
