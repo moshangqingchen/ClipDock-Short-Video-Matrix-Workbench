@@ -187,6 +187,35 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
           }
         }
       }
+      // Jingxuan's current-account control links to /user/self and may render
+      // its avatar as a CSS background instead of an <img>. The sidebar's
+      // generic "我的" link uses that route even for guests: require a visible,
+      // non-placeholder avatar inside the top bar link, outside feed content.
+      if (platform === 'douyin' && document.readyState !== 'loading') {
+        const selfAvatars = new Set();
+        const selfLinks = elements('header a[href], [data-e2e="douyin-header"] a[href]')
+          .filter(link => profileLink(link, /^\\/user\\/self\\/?$/, host));
+        for (const link of selfLinks) {
+          const nodes = [link, ...Array.from(link.querySelectorAll('img, span, div')).slice(0, 12)];
+          for (const node of nodes) {
+            if (!visible(node)) continue;
+            if (node.tagName === 'IMG') {
+              const avatar = safeAvatarUrl(node.currentSrc || node.getAttribute('src'));
+              if (avatar) selfAvatars.add(avatar);
+            } else {
+              const background = getComputedStyle(node).backgroundImage;
+              if (!background.startsWith('url(') || !background.endsWith(')') ||
+                  background.indexOf('url(', 4) !== -1) continue;
+              const avatar = safeAvatarUrl(background.slice(4, -1).trim().replace(/^["']|["']$/g, ''));
+              if (avatar) selfAvatars.add(avatar);
+            }
+          }
+        }
+        if (selfAvatars.size === 1) {
+          accountAvatar = true;
+          domAvatars.add(Array.from(selfAvatars)[0]);
+        }
+      }
       // The current Kuaishou homepage uses a clickable sidebar div, not a
       // header profile link. Match the rendered account against the one fixed
       // self-profile response slot; never inspect feed/profile-author entries.

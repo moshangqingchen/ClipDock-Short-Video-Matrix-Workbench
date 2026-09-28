@@ -324,6 +324,41 @@ describe("homepage current-account avatar extraction", () => {
 });
 
 describe("homepage current-account login detection", () => {
+  // The live Douyin Jingxuan top bar links the signed-in avatar to /user/self.
+  // Its sidebar exposes the same route to guests, so the link alone is insufficient.
+  const douyinSelfAvatar = '<a href="/user/self"><span style="background-image:url(https://p3.douyinpic.com/current-avatar.jpg)"></span></a>';
+  it.each([
+    ['background avatar', douyinSelfAvatar],
+    ['image avatar', '<a href="/user/self"><img src="https://p3.douyinpic.com/current-avatar.jpg"></a>'],
+    ['existing account container', '<div data-e2e="user-info"><a href="/user/self"><img src="https://p3.douyinpic.com/current-avatar.jpg"></a></div>'],
+  ])("recognizes Douyin Jingxuan's header self link with a %s", (_name, body) => {
+    expect(read("douyin", `<header>${body}</header>`, {}, { url: "https://www.douyin.com/jingxuan" }))
+      .toMatchObject({ kind: "online", avatarUrl: "https://p3.douyinpic.com/current-avatar.jpg" });
+  });
+
+  it.each([
+    ['sidebar', `<nav>${douyinSelfAvatar}</nav>`],
+    ['feed author', `<main><header>${douyinSelfAvatar}</header></main>`],
+    ['article author', `<article><header>${douyinSelfAvatar}</header></article>`],
+    ['hidden header', `<header hidden>${douyinSelfAvatar}</header>`],
+    ['hidden avatar', `<header>${douyinSelfAvatar.replace('<span ', '<span hidden ')}</header>`],
+    ['generic self link', '<header><a href="/user/self">我的</a></header>'],
+    ['unlinked avatar', '<header><img src="https://p3.douyinpic.com/current-avatar.jpg"></header>'],
+    ['placeholder', `<header>${douyinSelfAvatar.replace('current-avatar.jpg', 'default-avatar.jpg')}</header>`],
+    ['foreign profile', `<header>${douyinSelfAvatar.replace('/user/self', 'https://other.example/user/self')}</header>`],
+    ['public author profile', `<header>${douyinSelfAvatar.replace('/user/self', '/user/someone')}</header>`],
+    ['ambiguous avatars', `<header>${douyinSelfAvatar}${douyinSelfAvatar.replace('current-avatar.jpg', 'other-avatar.jpg')}</header>`],
+  ])("does not infer Douyin login from a %s", (_name, body) => {
+    expect(read("douyin", body).kind).toBe("unconfirmed");
+  });
+
+  it("waits for Douyin's header hydration and for conflicting login controls to settle", () => {
+    const body = `<header>${douyinSelfAvatar}</header>`;
+    expect(read("douyin", body, {}, { loading: true }).kind).toBe("unconfirmed");
+    expect(read("douyin", body + '<header><button data-e2e="login-button">登录</button></header>').kind)
+      .toBe("unconfirmed");
+  });
+
   it.each([
     [
       "douyin",
@@ -473,7 +508,7 @@ describe("homepage current-account login detection", () => {
     expect(
       read(
         "douyin",
-        '<header><div data-e2e="user-info"><a href="/user/self"><img src="/own.jpg"></a></div></header>',
+        '<nav><div data-e2e="user-info"><a href="/user/self"><img src="/own.jpg"></a></div></nav>',
       ).kind,
     ).toBe("unconfirmed");
     expect(
