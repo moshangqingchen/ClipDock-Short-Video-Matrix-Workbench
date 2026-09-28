@@ -4,7 +4,7 @@ import { isStrictBusinessNetwork } from "@main/network/business-access";
 
 /** Collector results enter here in the main process; no IPC accepts a source URL. */
 export interface MediaIntake {
-  avatar(accountId: string, sourceUrl: string): void;
+  avatar(accountId: string, sourceUrl: string, options?: { refresh: boolean }): void;
   covers(accountId: string, works: readonly Work[]): void;
 }
 
@@ -22,11 +22,19 @@ const MEDIA_REFRESH_INTERVAL_MS = 5 * 60_000;
 const mediaRevision = () => `media:${Math.floor(Date.now() / MEDIA_REFRESH_INTERVAL_MS)}`;
 
 export function createMediaIntake(sink: MediaOfferSink): MediaIntake {
+  const avatarRefreshes = new Map<string, { generation: string; revision: string }>();
   return {
-    avatar(accountId, sourceUrl) {
+    avatar(accountId, sourceUrl, options) {
       if (!isStrictBusinessNetwork()) return;
       try {
-        sink.offer({ accountId, kind: "avatar" }, { sourceUrl, sourceRevision: mediaRevision() });
+        const generation = mediaRevision();
+        const previous = avatarRefreshes.get(accountId);
+        const revision = options?.refresh ? `${generation}:refresh:${Math.floor(Date.now() / 30_000)}` :
+          previous?.generation === generation ? previous.revision : generation;
+        avatarRefreshes.delete(accountId);
+        avatarRefreshes.set(accountId, { generation, revision });
+        if (avatarRefreshes.size > 256) avatarRefreshes.delete(avatarRefreshes.keys().next().value!);
+        sink.offer({ accountId, kind: "avatar" }, { sourceUrl, sourceRevision: revision });
       } catch {
         // Optional media never changes auth/collection status or exposes the URL/error.
       }

@@ -324,6 +324,17 @@ describe("homepage current-account avatar extraction", () => {
 });
 
 describe("homepage current-account login detection", () => {
+  it("updates a dedicated self-store nickname while excluding feed authors and conflicting header identity", () => {
+    const state = (nickname: string) => ({ __INITIAL_STATE__: { user: { loggedIn: true,
+      userInfo: { userId: "self", nickname, avatar: "https://sns.xhscdn.com/self.jpg" } } } });
+    const header = '<div class="side-bar"><div class="user"><a href="/user/profile/self"><img src="https://sns.xhscdn.com/self.jpg"></a></div></div>';
+    expect(read("xiaohongshu", header + '<article><h1>别人</h1></article>', state("新昵称")).displayName).toBe("新昵称");
+    expect(read("xiaohongshu", '<article><h1>别人</h1></article>')).not.toHaveProperty("displayName");
+    expect(read("xiaohongshu", header.replace('self.jpg', 'another.jpg'), state("旧账号"))).not.toHaveProperty("displayName");
+    const conflicting = { __INITIAL_STATE__: { userStore: { isLogin: true, userInfo: { uid: "one", nickname: "旧名字" } },
+      currentUserStore: { isLogin: true, userInfo: { uid: "two", nickname: "新名字" } } } };
+    expect(read("douyin", "", conflicting)).not.toHaveProperty("displayName");
+  });
   const biliDefaultAvatar = '<a href="https://space.bilibili.com/1234"><img src="https://i0.hdslb.com/bfs/face/noface.jpg"></a>';
   const biliAccountHeader = (content = biliDefaultAvatar) => `<div class="bili-header"><div class="header-avatar-wrap">${content}</div></div>`;
   it.each([
@@ -458,11 +469,12 @@ describe("homepage current-account login detection", () => {
     ],
     ["douyin", { __INITIAL_STATE__: { userStore: { isLogin: true, userInfo: { sec_uid: "self" } } } }],
     ["kuaishou", { __NUXT__: { state: { user: { isLogin: true, userInfo: { userId: "self" } } } } }],
-  ])("confirms %s's dedicated current-account store without returning private data", (platform, state) => {
+  ])("returns only the current nickname and login verdict, never IDs or secrets from %s's store", (platform, state) => {
     const result = read(platform as PlatformId, "", state as Record<string, unknown>);
     expect(result.kind).toBe("online");
-    expect(Object.keys(result).sort()).toEqual(["kind", "reason", "source"]);
-    expect(JSON.stringify(result)).not.toMatch(/Private|secret|self/);
+    expect(Object.keys(result).filter(key => key !== "displayName").sort()).toEqual(["kind", "reason", "source"]);
+    expect(JSON.stringify(result)).not.toMatch(/secret|self/);
+    if (result.displayName) expect(result.displayName).toBe("Private");
   });
 
   it.each(Object.keys(homes))("accepts an explicit, visible account logout control on %s", (platform) => {

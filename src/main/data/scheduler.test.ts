@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { createStore, type Store } from "@main/db";
 import type { ViewPool } from "@main/browser/view-pool";
-import type { AccountService } from "@main/services/account-service";
+import { profilePatch, type AccountService, type ProfileInfo } from "@main/services/account-service";
 import {
   beginBusinessOperation,
   installBusinessNetwork,
@@ -87,6 +87,14 @@ function setup(platformId: PlatformId = "douyin", needsMediaRefresh?: (accountId
     update,
     checkStatus,
     prepareNetworkOperation,
+    profileVersion: vi.fn(() => 0),
+    syncProfile: vi.fn((id: string, info: ProfileInfo, version: number, observed: typeof account) => {
+      if (version !== accounts.profileVersion(id)) return store.accounts.get(id)!;
+      const patch = profilePatch(store.accounts.get(id)!, info, observed);
+      const updated = Object.keys(patch).length ? update(id, patch) : store.accounts.get(id)!;
+      if (info.avatarUrl) mediaIntake.avatar(id, info.avatarUrl);
+      return updated;
+    }),
   } as unknown as AccountService;
   const getState = vi.fn(() => ({ instanceId: 1, navigationId, url, visible: entry.visible, messageMode: entry.messageMode }));
   const getIdentityEvidence = vi.fn(() => null as { key: string; kind?: "online"; subject?: string; profile?: { externalId: string } } | null);
@@ -147,6 +155,25 @@ const revoke = () => {
 };
 
 describe("CollectScheduler network queue", () => {
+  it.each(["ordinary rename", "newer observed profile", "local edit during collection"] as const)(
+    "keeps the latest account name during collection: %s", async mode => {
+      allowed = true;
+      const s = setup();
+      store.accounts.update(s.account.id, { displayName: "旧平台昵称" });
+      s.payload.profile = { displayName: "平台最新昵称", avatarUrl: "https://media.example.test/new.jpg" };
+      const job = scheduler.enqueue(s.account.id, "manual");
+      await vi.advanceTimersByTimeAsync(1000);
+      if (mode === "newer observed profile") {
+        store.accounts.update(s.account.id, { displayName: "刚收到的昵称" });
+        vi.spyOn(s.accounts, "profileVersion").mockReturnValue(1);
+      } else if (mode === "local edit during collection") store.accounts.update(s.account.id, { displayName: "刚编辑的昵称" });
+      s.result.resolve(s.payload); await vi.advanceTimersByTimeAsync(0);
+      expect(store.collectJobs.get(job.id)?.state).toBe("done");
+      expect(store.accounts.get(s.account.id)?.displayName).toBe(mode === "ordinary rename" ? "平台最新昵称" :
+        mode === "newer observed profile" ? "刚收到的昵称" : "刚编辑的昵称");
+      if (mode === "newer observed profile") expect(s.mediaIntake.avatar).not.toHaveBeenCalled();
+    },
+  );
   it.each(["manual", "scheduled", "login", "keepalive"] as const)(
     "preserves visible and hidden message pages before declaring a %s collection scope", async trigger => {
       allowed = true;

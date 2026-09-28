@@ -47,6 +47,22 @@ function storeFixture() {
 }
 
 describe("media intake and persisted source boundary", () => {
+  it("refreshes same-URL avatars on profile updates, coalescing changes within thirty seconds", () => {
+    mode("strict"); vi.useFakeTimers(); vi.setSystemTime("2026-09-28T10:01:00Z");
+    const sink = { offer: vi.fn() }, intake = createMediaIntake(sink), url = "https://media.example.test/avatar.jpg";
+    intake.avatar("one", url);
+    const ordinary = sink.offer.mock.calls[0][1].sourceRevision;
+    intake.avatar("one", url, { refresh: true });
+    const fresh = sink.offer.mock.calls[1][1].sourceRevision;
+    expect(fresh).not.toBe(ordinary);
+    intake.avatar("one", url); intake.avatar("one", url, { refresh: true });
+    expect(sink.offer.mock.calls[2][1].sourceRevision).toBe(fresh);
+    expect(sink.offer.mock.calls[3][1].sourceRevision).toBe(fresh);
+    vi.advanceTimersByTime(30_000); intake.avatar("one", url, { refresh: true });
+    expect(sink.offer.mock.calls[4][1].sourceRevision).not.toBe(fresh);
+    intake.avatar("two", url);
+    expect(sink.offer.mock.calls[5][1].sourceRevision).toBe(ordinary);
+  });
   it("keeps observation display behavior without starting the new downloader", () => {
     mode("observe");
     const sink = { offer: vi.fn() },

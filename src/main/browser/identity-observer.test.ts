@@ -4,13 +4,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { installBusinessNetwork } from "@main/network/business-access";
 import { IdentityObserver } from "./identity-observer";
 import { acquireDebugger } from "./debugger-lease";
+import type { PlatformId } from "@shared/platforms";
 
 const url = "https://cp.kuaishou.com/rest/cp/creator/pc/home/infoV2";
 const cleanups: Array<() => void> = [];
 afterEach(() => {
   for (const fn of cleanups.splice(0).reverse()) fn();
 });
-function fixture() {
+function fixture(platform: PlatformId = "kuaishou") {
   cleanups.push(
     installBusinessNetwork({
       enforcement: "observe",
@@ -43,7 +44,7 @@ function fixture() {
     isDestroyed: () => false,
   }) as unknown as WebContents;
   const changed = vi.fn();
-  const observer = new IdentityObserver(contents, "account", "kuaishou", changed);
+  const observer = new IdentityObserver(contents, "account", platform, changed);
   cleanups.push(() => observer.dispose());
   const request = (id: string, address = url) => {
     debug.emit("message", {}, "Network.requestWillBeSent", { requestId: id, request: { url: address } });
@@ -63,9 +64,22 @@ function fixture() {
     await Promise.resolve();
     await Promise.resolve();
   };
-  return { observer, debug, request, respond, contents, changed };
+  return { observer, debug, request, respond, contents, changed, replies };
 }
 describe("passive identity observation", () => {
+  it("observes a renamed Bilibili self profile without replaying or sending any page request", async () => {
+    const f = fixture("bilibili");
+    const nav = "https://api.bilibili.com/x/web-interface/nav";
+    for (const name of ["旧名字", "新名字"]) {
+      f.request(name, nav);
+      f.replies.get(name)!({ body: JSON.stringify({ code: 0, data: { isLogin: true, mid: 1234, uname: name, face: `https://i0.hdslb.com/${name}.jpg` } }), base64Encoded: false });
+      await vi.waitFor(() => expect(f.observer.read()?.profile?.displayName).toBe(name));
+    }
+    expect(f.changed).toHaveBeenCalledTimes(2);
+    expect(f.debug.sendCommand.mock.calls.map(([method]) => method)).toEqual(["Network.enable", "Network.getResponseBody", "Network.getResponseBody"]);
+    f.request("author", "https://api.bilibili.com/x/space/wbi/acc/info?mid=8888");
+    expect(f.replies.has("author")).toBe(false);
+  });
   it("keeps only the document subject after login evidence expires and clears it on navigation", async () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(1000);
     try {

@@ -9,7 +9,7 @@ import type { ToastEvent } from "@shared/ipc";
 import type { Store } from "@main/db";
 import type { ViewPool } from "@main/browser/view-pool";
 import { isHomepageContext } from "@main/browser/homepage-login";
-import { profilePatch, type AccountService } from "@main/services/account-service";
+import type { AccountService } from "@main/services/account-service";
 import { persistableMediaReference, type MediaIntake } from "@main/services/media-intake";
 import {
   beginBusinessOperation,
@@ -511,6 +511,8 @@ export class CollectScheduler {
       for (let batchPage = 0; batchPage < 5; batchPage++) {
         check();
         signal.throwIfAborted();
+        const profileVersion = accounts.profileVersion(account.id);
+        const profileAccount = store.accounts.get(account.id)!;
         const result = await withBusinessTaskSignal(signal, () => collector.collect({
           webContents: wc, account, progress,
           skipProfile: batchPage > 0 || progress.pagesDone > 0,
@@ -561,10 +563,6 @@ export class CollectScheduler {
           let newlySeen = 0;
           for (const work of result.works) newlySeen += store.db.run("INSERT OR IGNORE INTO collection_seen(job_id,remote_id) VALUES(?,?)", [job.id, work.remoteId]).changes;
           next.worksSeen = progress.worksSeen + newlySeen;
-          if (result.profile) {
-            const patch = profilePatch(store.accounts.get(account.id)!, result.profile);
-            if (Object.keys(patch).length) accounts.update(account.id, patch);
-          }
           store.collectJobs.checkpoint(job.id, next);
           check();
           return { metrics, works };
@@ -575,7 +573,7 @@ export class CollectScheduler {
         this.changed(store.collectJobs.get(job.id));
         if (written.metrics || written.works) this.options.onMetrics?.(account.id);
         lease.assertCurrent();
-        if (result.profile?.avatarUrl) this.options.mediaIntake?.avatar(account.id, result.profile.avatarUrl);
+        if (result.profile) accounts.syncProfile(account.id, result.profile, profileVersion, profileAccount);
         this.options.mediaIntake?.covers(account.id, result.works);
         if (!further) break;
         if (batchPage < 4) await wait(2_000 + Math.floor(Math.random() * 3_001), undefined, { signal });

@@ -78,10 +78,13 @@ export class AccountService extends EventEmitter {
   private attemptSequence = 0;
   private readonly lastProbeAt = new Map<string, number>();
   private patrolTimer: ReturnType<typeof setInterval> | undefined;
+  private homepageProfileTimer: ReturnType<typeof setInterval> | undefined;
   private startupPatrolTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly accountEpoch = new Map<string, number>();
   private readonly sessionChanges = new Set<string>();
   private readonly profileRequests = new Map<string, number>();
+  private readonly profileVersions = new Map<string, number>();
+  private readonly profileEvidenceKeys = new Map<string, string>();
   private disposed = false;
   private patrolGeneration = 0;
   private readonly recoveryPending = new Set<string>();
@@ -142,6 +145,41 @@ export class AccountService extends EventEmitter {
     if (!account) throw new Error("账号不存在");
     this.emit("account-changed", account);
     return account;
+  }
+
+  /** Guards asynchronous profile responses against a newer observed platform profile. */
+  profileVersion(id: string): number { return this.profileVersions.get(id) ?? 0; }
+
+  syncProfile(id: string, info: ProfileInfo, expectedVersion = this.profileVersion(id), observedAccount = this.get(id), refreshAvatar = true): Account {
+    const current = this.get(id);
+    if (this.disposed || this.sessionChanges.has(id) || !canUseBusinessNetwork(id) || this.profileVersion(id) !== expectedVersion)
+      return current;
+    const patch = profilePatch(current, info, observedAccount);
+    const avatar = profileAvatar(info.avatarUrl);
+    if (!Object.keys(patch).length && !avatar) return current;
+    this.profileVersions.set(id, expectedVersion + 1);
+    const updated = Object.keys(patch).length ? this.update(id, patch) : current;
+    // A cached DB field may be unchanged while its image content or media cache
+    // changed. Always offer fresh profile media through the bounded intake.
+    if (avatar) {
+      if (refreshAvatar) this.options.mediaIntake?.avatar(id, avatar, { refresh: true });
+      else this.options.mediaIntake?.avatar(id, avatar);
+    }
+    return updated;
+  }
+
+  private syncObservedProfile(accountId: string): void {
+    if (this.disposed || this.sessionChanges.has(accountId) || !canUseBusinessNetwork(accountId)) return;
+    const evidence = this.options.viewPool.getIdentityEvidence?.(accountId);
+    const page = this.options.viewPool.getState(accountId);
+    if (!evidence || evidence.kind !== "online" || !evidence.profile || !evidence.subject ||
+        evidence.profile.externalId !== evidence.subject || !Number.isFinite(evidence.observedAt) ||
+        Date.now() < evidence.observedAt || Date.now() - evidence.observedAt > 30_000 ||
+        this.profileEvidenceKeys.get(accountId) === evidence.key || !page?.url ||
+        page.isLoginPage || page.isVerificationPage ||
+        isLoginUrl(this.get(accountId).platformId, page.url) || isVerificationUrl(this.get(accountId).platformId, page.url)) return;
+    this.profileEvidenceKeys.set(accountId, evidence.key);
+    this.syncProfile(accountId, evidence.profile);
   }
 
   reorder(ids: string[]): void {
@@ -279,6 +317,7 @@ export class AccountService extends EventEmitter {
   onActivity(accountId: string, reason: "navigated" | "cookies" | "loaded" | "identity"): void {
     const account = this.options.store.accounts.get(accountId);
     if (!account) return;
+    if (reason === "identity" || reason === "loaded") this.syncObservedProfile(accountId);
     // Creator identity responses do not describe a consumer homepage session.
     if (reason === "identity" && requiresHomepageLogin(account.platformId)) return;
     // Platforms rotate cookies and navigate during ordinary use. These events
@@ -322,6 +361,8 @@ export class AccountService extends EventEmitter {
     this.lastAttemptAt.delete(accountId);
     this.negativeEvidence.delete(accountId);
     this.consumedEvidence.delete(accountId);
+    this.profileEvidenceKeys.delete(accountId);
+    this.profileVersions.set(accountId, this.profileVersion(accountId) + 1);
     this.pageActivitySequence.delete(accountId);
     this.options.viewPool.invalidateIdentity?.(accountId);
     this.accountEpoch.set(accountId, (this.accountEpoch.get(accountId) ?? 0) + 1);
@@ -594,19 +635,19 @@ export class AccountService extends EventEmitter {
         result.source !== "homepage" && result.evidenceKey && result.status === "online"
           ? startingEvidence?.profile : undefined;
       if (profile) {
-        const patch = profilePatch(this.get(accountId), profile);
-        if (Object.keys(patch).length) this.options.store.accounts.update(accountId, patch);
+        this.syncProfile(accountId, profile);
       }
       const updated = this.options.store.accounts.updateStatus(accountId, result.status, result.message, {
         sessionExpiresAt: result.sessionExpiresAt ?? null,
       })!;
-      const checked = this.recordCheck(accountId, "confirmed", result.message);
+      this.recordCheck(accountId, "confirmed", result.message);
       if (result.source === "homepage" && result.status === "online") {
-        const avatar = profileAvatar(result.avatarUrl);
-        if (avatar) this.options.mediaIntake?.avatar(accountId, avatar);
-      } else if (profile) {
-        const avatar = profileAvatar(profile.avatarUrl);
-        if (avatar) this.options.mediaIntake?.avatar(accountId, avatar);
+        // A just-observed self-profile API can be ahead of the DOM during a save.
+        // Keep that newer profile instead of overwriting it with the old header.
+        const identity = this.options.viewPool.getIdentityEvidence?.(accountId);
+        const self = identity?.kind === "online" ? identity.profile : undefined;
+        this.syncProfile(accountId, { displayName: self?.displayName ?? homepage?.displayName,
+          avatarUrl: self?.avatarUrl ?? result.avatarUrl }, this.profileVersion(accountId), this.get(accountId), false);
       }
       if (previous !== result.status) {
         this.options.store.audit.append({
@@ -629,7 +670,7 @@ export class AccountService extends EventEmitter {
           this.emit("account-online", updated);
         }
       }
-      return checked;
+      return this.get(accountId);
     } catch (error) {
       if (isNetworkDormantError(error)) {
         if (this.disposed || this.sessionChanges.has(accountId))
@@ -815,6 +856,7 @@ export class AccountService extends EventEmitter {
     const startingView = this.options.viewPool.getState(accountId);
     if (startingView && !isProfilePage(account.platformId, startingView)) return account;
     const startingSubject = this.options.viewPool.getIdentityEvidence?.(accountId)?.subject;
+    const profileVersion = this.profileVersion(accountId);
     try {
       this.prepareNetworkOperation(accountId, "profile");
     } catch (error) {
@@ -844,17 +886,13 @@ export class AccountService extends EventEmitter {
         startingView?.url !== currentView?.url ||
         (currentView && !isProfilePage(account.platformId, currentView)) ||
         startingSubject !== currentSubject ||
+        profileVersion !== this.profileVersion(accountId) ||
         (current.status !== account.status && current.status !== "online" && current.status !== "expiring")
       )
         return current;
       if (!info) return current;
-      const patch = profilePatch(current, info);
-      if (Object.keys(patch).length === 0) return current;
-      const updated = this.update(accountId, patch);
       operation.assertCurrent();
-      const avatar = profileAvatar(info.avatarUrl);
-      if (avatar) this.options.mediaIntake?.avatar(accountId, avatar);
-      return updated;
+      return this.syncProfile(accountId, info, profileVersion, account);
     } catch (error) {
       if (isNetworkDormantError(error)) return this.options.store.accounts.get(accountId) ?? account;
       throw error;
@@ -874,6 +912,16 @@ export class AccountService extends EventEmitter {
     // distinguish a guest cookie from a login) but staggers the requests so
     // boot never looks like a burst to any platform.
     this.startupPatrolTimer = setTimeout(() => void this.patrol(), 3_000);
+    // Local DOM reads only. This observes a changed current-account avatar/name
+    // without reloading a page, polling QR endpoints or interrupting messages.
+    this.homepageProfileTimer = setInterval(() => {
+      for (const account of this.list()) {
+        const page = this.options.viewPool.getState(account.id);
+        if (page?.visible && !page.loading && !page.messageMode && isHomepageContext(account.platformId, page.url))
+          void this.checkStatus(account.id, { skipProbe: true, silent: true, force: true }).catch(() => undefined);
+      }
+    }, 15_000);
+    this.homepageProfileTimer.unref?.();
   }
 
   stopPatrol(): void {
@@ -882,6 +930,8 @@ export class AccountService extends EventEmitter {
     this.startupPatrolTimer = undefined;
     if (this.patrolTimer) clearInterval(this.patrolTimer);
     this.patrolTimer = undefined;
+    if (this.homepageProfileTimer) clearInterval(this.homepageProfileTimer);
+    this.homepageProfileTimer = undefined;
   }
 
   private async patrol(): Promise<void> {
@@ -935,11 +985,6 @@ function canRefreshChannelsPage(page: ViewState | null): boolean {
   } catch { return false; }
 }
 
-function isGeneratedName(account: Account): boolean {
-  const platform = getPlatform(account.platformId);
-  return new RegExp(`^${platform.shortName}账号 \\d+$`).test(account.displayName);
-}
-
 function isProfilePage(platformId: PlatformId, state: ViewState): boolean {
   if (state.loading || state.isLoginPage || !state.url || isLoginUrl(platformId, state.url) ||
     isVerificationUrl(platformId, state.url)) return false;
@@ -978,15 +1023,15 @@ function profileAvatar(value: unknown): string | undefined {
 }
 
 /** Missing/placeholder scan fields never mean that saved account information was deleted. */
-export function profilePatch(account: Account, info: ProfileInfo): AccountUpdateInput {
+export function profilePatch(account: Account, info: ProfileInfo, observedAccount: Account = account): AccountUpdateInput {
   const patch: AccountUpdateInput = {};
   const displayName = profileText(info.displayName, 60);
   const avatarUrl = profileAvatar(info.avatarUrl);
   const handle = profileId(info.handle);
   const externalId = profileId(info.externalId);
-  if (displayName && isGeneratedName(account)) patch.displayName = displayName;
-  if (avatarUrl) patch.avatarUrl = persistableMediaReference(avatarUrl);
-  if (handle) patch.handle = handle;
-  if (externalId) patch.externalId = externalId;
+  if (displayName && displayName !== account.displayName && account.displayName === observedAccount.displayName) patch.displayName = displayName;
+  if (avatarUrl && (account.avatarUrl ?? null) !== persistableMediaReference(avatarUrl)) patch.avatarUrl = persistableMediaReference(avatarUrl);
+  if (handle && handle !== account.handle) patch.handle = handle;
+  if (externalId && externalId !== account.externalId) patch.externalId = externalId;
   return patch;
 }

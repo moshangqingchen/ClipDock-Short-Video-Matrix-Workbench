@@ -6,6 +6,8 @@ export interface HomepageLoginVerdict {
   source: "homepage";
   /** Current-account avatar source only; the main process must validate/cache it before display. */
   avatarUrl?: string;
+  /** Nickname from a dedicated current-account store, never a page author/title. */
+  displayName?: string;
 }
 
 const PUBLIC_HOSTS: Partial<Record<PlatformId, string>> = {
@@ -42,7 +44,7 @@ export function isHomepageContext(platformId: PlatformId, url: string): boolean 
 /**
  * Read only the public site's current-account UI and dedicated account stores.
  * No requests, cookie reads, DOM mutations, or global-object traversal.
- * Only the confirmed account's avatar may be returned; names/IDs stay in-page.
+ * Only the confirmed account's avatar and nickname may be returned; IDs stay in-page.
  * Recommendation authors and a generic "我的" link prove nothing.
  */
 export function buildHomepageLoginScript(platformId: PlatformId): string {
@@ -52,8 +54,9 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
     const host = ${JSON.stringify(PUBLIC_HOSTS[platformId] ?? "")};
     const verificationHosts = ${JSON.stringify(verificationHosts)};
     const verificationPaths = ${JSON.stringify(verificationPaths)};
-    const result = (kind, reason, avatarUrl) => ({ kind, reason, source: 'homepage',
-      ...(kind === 'online' && avatarUrl ? { avatarUrl } : {}) });
+    const result = (kind, reason, avatarUrl, displayName) => ({ kind, reason, source: 'homepage',
+      ...(kind === 'online' && avatarUrl ? { avatarUrl } : {}),
+      ...(kind === 'online' && displayName ? { displayName } : {}) });
     const unknown = () => result('unconfirmed', '主页登录信息尚未加载或未能识别，等待主页确认');
     try {
       const page = new URL(location.href);
@@ -155,6 +158,7 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
       let storeLoggedIn = false;
       let storeLoggedOut = false;
       const storeAvatars = new Set();
+      const storeNames = new Set();
       for (const store of stores) {
         if (!store || typeof store !== 'object') continue;
         const loggedIn = read(store, ['loggedIn']) ?? read(store, ['isLogin']) ?? read(store, ['isLoggedIn']);
@@ -163,6 +167,8 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
           storeLoggedIn = true;
           const avatar = storeAvatar(user);
           if (avatar) storeAvatars.add(avatar);
+          const name = user.nickname ?? user.nickName ?? user.nick_name ?? user.userName ?? user.name;
+          if (typeof name === 'string' && name.trim()) storeNames.add(name.trim().slice(0, 60));
         }
         if (loggedIn === false) storeLoggedOut = true;
       }
@@ -249,6 +255,7 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
                 expectedAvatar && avatar === expectedAvatar) {
               accountAvatar = true;
               domAvatars.add(avatar);
+              storeNames.add(self.userName.trim().slice(0, 60));
             }
           }
         }
@@ -256,6 +263,9 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
       // Conflicting account images can appear during account switching; wait
       // for a single current avatar rather than caching one at random.
       const currentAvatarUrl = domAvatars.size === 1 ? Array.from(domAvatars)[0] : undefined;
+      const currentName = !storeLoggedOut && storeNames.size === 1 && domAvatars.size <= 1 &&
+        (!currentAvatarUrl || storeAvatars.size === 0 || storeAvatars.size === 1 && storeAvatars.has(currentAvatarUrl))
+        ? Array.from(storeNames)[0] : undefined;
 
       const controls = elements('header button, header a, header [role="button"], header [role="menuitem"], ' +
         '.side-bar button, .side-bar a, .side-bar [role="button"], .user-menu button, .user-menu a, ' +
@@ -288,10 +298,10 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
         if (document.readyState === 'loading' || accountAvatar || logoutEntry) return unknown();
         return result('offline', storeLoggedOut ? '主页当前账号状态为未登录' : '主页已显示未登录入口');
       }
-      if (accountAvatar) return result('online', '主页已显示当前登录账号', currentAvatarUrl);
+      if (accountAvatar) return result('online', '主页已显示当前登录账号', currentAvatarUrl, currentName);
       if (logoutEntry) return result('online', '主页已显示已登录账号的退出入口');
       if (storeLoggedIn && !storeLoggedOut) return result('online', '主页当前账号已登录',
-        storeAvatars.size === 1 ? Array.from(storeAvatars)[0] : undefined);
+        storeAvatars.size === 1 ? Array.from(storeAvatars)[0] : undefined, currentName);
       return unknown();
     } catch { return unknown(); }
   })()`;

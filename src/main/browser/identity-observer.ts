@@ -27,7 +27,7 @@ export class IdentityObserver {
     private readonly platform: PlatformId,
     private readonly changed: () => void,
   ) {
-    if (platform !== "kuaishou" && platform !== "weixin_channels") return;
+    if (!["douyin", "kuaishou", "xiaohongshu", "bilibili", "baijiahao", "weixin_channels"].includes(platform)) return;
     try {
       this.release = acquireDebugger(contents);
       contents.debugger.on("message", this.onMessage);

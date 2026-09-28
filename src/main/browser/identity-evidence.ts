@@ -14,6 +14,12 @@ export interface IdentityEvidence extends IdentityVerdict {
 }
 
 const paths: Partial<Record<PlatformId, { host: string; paths: string[] }>> = {
+  bilibili: { host: "api.bilibili.com", paths: ["/x/web-interface/nav"] },
+  douyin: { host: "creator.douyin.com", paths: [
+    "/web/api/media/user/info/", "/aweme/v1/creator/user/info/", "/web/api/creator/user/info/",
+  ] },
+  xiaohongshu: { host: "creator.xiaohongshu.com", paths: ["/api/galaxy/user/info", "/api/galaxy/creator/user/info"] },
+  baijiahao: { host: "baijiahao.baidu.com", paths: ["/builder/app/appinfo", "/pcui/user/getinfo", "/builder/author/appinfo"] },
   kuaishou: {
     host: "cp.kuaishou.com",
     paths: [
@@ -40,7 +46,8 @@ export function isIdentityEndpoint(platform: PlatformId, url: string): boolean {
       !parsed.password &&
       !parsed.port &&
       parsed.hostname === target.host &&
-      target.paths.includes(parsed.pathname),
+      target.paths.includes(parsed.pathname) &&
+      ![...parsed.searchParams.keys()].some(key => /^(?:mid|uid|user_?id|sec_uid|target_?id|author_?id|app_?id)$/i.test(key)),
     );
   } catch {
     return false;
@@ -65,23 +72,31 @@ function identity(value: Record<string, unknown>, fields: string[]): string | un
 }
 
 function avatarSource(user: Record<string, unknown>, platform: PlatformId): string | undefined {
-  const fields = platform === "weixin_channels" ? ["headImgUrl"] : ["headUrl", "headurl", "avatar", "userHead"];
+  const fields = platform === "weixin_channels" ? ["headImgUrl"] : platform === "bilibili" ? ["face"] :
+    platform === "douyin" ? ["avatar_thumb", "avatar_medium", "avatar_larger", "avatar", "avatar_url"] :
+    platform === "xiaohongshu" ? ["userAvatar", "avatar", "image", "images"] :
+    platform === "baijiahao" ? ["avatar", "avatar_url", "logo", "head_img"] : ["headUrl", "headurl", "avatar", "userHead"];
   for (const field of fields) {
-    const value = user[field];
-    if (typeof value !== "string" || value.length > 8192 ||
-        [...value].some((char) => char.charCodeAt(0) <= 0x20 || char === "\u007f" || char === "\\")) continue;
-    try {
-      const url = new URL(value);
-      if (["http:", "https:"].includes(url.protocol) && !url.username && !url.password && !url.port)
-        return url.href;
-    } catch { /* Missing/malformed avatar does not affect the identity verdict. */ }
+    const raw = user[field];
+    const item = record(raw);
+    const values = Array.isArray(raw) ? raw.slice(0, 8) : Array.isArray(item.url_list) ? item.url_list.slice(0, 8) : [item.url ?? raw];
+    for (const candidate of values) {
+      const value = typeof candidate === "string" && candidate.startsWith("//") ? `https:${candidate}` : candidate;
+      if (typeof value !== "string" || value.length > 8192 ||
+          [...value].some((char) => char.charCodeAt(0) <= 0x20 || char === "\u007f" || char === "\\")) continue;
+      try {
+        const url = new URL(value);
+        if (["http:", "https:"].includes(url.protocol) && !url.username && !url.password && !url.port)
+          return url.href;
+      } catch { /* Missing/malformed avatar does not affect the identity verdict. */ }
+    }
   }
   return undefined;
 }
 
 function authenticated(user: Record<string, unknown>, subject: string, platform: PlatformId): IdentityVerdict {
-  const nickname = user.nickname ?? user.nickName ?? user.name ?? user.userName;
-  const handle = user.uniqId ?? user.kwaiId ?? user.userKwaiId;
+  const nickname = user.nickname ?? user.nickName ?? user.nick_name ?? user.uname ?? user.name ?? user.userName ?? user.app_name ?? user.author_name;
+  const handle = platform === "bilibili" ? subject : user.uniqId ?? user.kwaiId ?? user.userKwaiId ?? user.unique_id ?? user.short_id ?? user.redId ?? user.red_id;
   const followers = user.fansCount ?? user.fans_count ?? user.followerCount ?? user.fansCnt;
   const following = user.followCnt ?? user.followCount;
   const likes = user.likeCnt ?? user.likeCount;
@@ -126,6 +141,33 @@ export function parseIdentityResponse(
     return unknown;
   }
   const data = record(root.data);
+  // Only dedicated current-account endpoints are observed; author/profile-by-ID
+  // endpoints must never be added here. These profiles do not confer homepage login.
+  if (platform === "bilibili") {
+    if (root.code === -101 || root.code === 0 && data.isLogin === false)
+      return { kind: "offline", reason: "身份接口返回登录失效" };
+    const subject = identity(data, ["mid"]);
+    if (root.code === 0 && data.isLogin === true && subject && /^[1-9]\d*$/.test(subject))
+      return authenticated(data, subject, platform);
+  }
+  if (platform === "douyin" && (root.status_code === 0 || root.status_code === "0")) {
+    for (const user of [record(root.user), record(data.user), record(root.user_info)]) {
+      const subject = identity(user, ["sec_uid", "uid", "user_id"]);
+      if (subject) return authenticated(user, subject, platform);
+    }
+  }
+  if (platform === "xiaohongshu" && root.success !== false && (root.code === 0 || root.code === "0")) {
+    for (const user of [data, record(data.userDetail)]) {
+      const subject = identity(user, ["userId", "user_id"]);
+      if (subject) return authenticated(user, subject, platform);
+    }
+  }
+  if (platform === "baijiahao" && (root.errno === 0 || root.errno === "0")) {
+    for (const user of [record(data.user), record(data.author), data]) {
+      const subject = identity(user, ["app_id", "appid", "author_id", "uid"]);
+      if (subject) return authenticated(user, subject, platform);
+    }
+  }
   if (platform === "kuaishou") {
     if ([109, 401, 100110000].includes(Number(root.result)))
       return { kind: "offline", reason: "平台身份接口确认登录失效" };

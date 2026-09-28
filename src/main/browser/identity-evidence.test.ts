@@ -1,6 +1,34 @@
 import { describe, expect, it } from "vitest";
 import { isIdentityEndpoint, parseIdentityResponse } from "./identity-evidence";
 
+describe("current profile observation on additional platforms", () => {
+  const cases = [
+    ["bilibili", "https://api.bilibili.com/x/web-interface/nav", { code: 0, data: { isLogin: true, mid: 1234, uname: "新昵称", face: "//i0.hdslb.com/new.jpg" } }],
+    ["douyin", "https://creator.douyin.com/web/api/media/user/info/", { status_code: 0, user: { sec_uid: "self", nickname: "新昵称", avatar_thumb: { url_list: ["https://p.byteimg.com/new.jpg"] } } }],
+    ["xiaohongshu", "https://creator.xiaohongshu.com/api/galaxy/user/info", { code: 0, success: true, data: { userId: "self", userName: "新昵称", userAvatar: "https://sns.xhscdn.com/new.jpg" } }],
+    ["baijiahao", "https://baijiahao.baidu.com/builder/app/appinfo", { errno: 0, data: { app_id: "self", app_name: "新昵称", logo: "https://pic.bdstatic.com/new.jpg" } }],
+  ] as const;
+  it.each(cases)("reads only %s's own successful identity response", (platform, url, body) => {
+    const result = parseIdentityResponse(platform, url, 200, JSON.stringify({ ...body, token: "secret" }));
+    expect(result).toMatchObject({ kind: "online", profile: { displayName: "新昵称", avatarUrl: expect.stringMatching(/^https:/) } });
+    expect(JSON.stringify(result)).not.toContain("secret");
+    for (const badUrl of [url + "?user_id=another", url + "?mid=123", url.replace("https:", "http:"), url.replace(".com", ".com.evil.example")]) {
+      expect(isIdentityEndpoint(platform, badUrl)).toBe(false);
+      expect(parseIdentityResponse(platform, badUrl, 200, JSON.stringify(body)).kind).toBe("unconfirmed");
+    }
+    for (const code of [401, 403, 429, 500])
+      expect(parseIdentityResponse(platform, url, code, JSON.stringify(body)).profile).toBeUndefined();
+    expect(parseIdentityResponse(platform, url, 200, '{}').profile).toBeUndefined();
+  });
+  it("rejects Bilibili profile-by-ID, unsuccessful envelopes, and a guest's cached nickname", () => {
+    const url = cases[0][1];
+    expect(isIdentityEndpoint("bilibili", "https://api.bilibili.com/x/space/wbi/acc/info?mid=1234")).toBe(false);
+    for (const data of [{ isLogin: false, mid: 1234 }, { isLogin: true, mid: 0 }, { mid: 1234 }])
+      expect(parseIdentityResponse("bilibili", url, 200, JSON.stringify({ code: 0, data: { ...data, uname: "旧昵称" } })).profile).toBeUndefined();
+    expect(parseIdentityResponse("bilibili", url, 200, JSON.stringify({ ...cases[0][2], code: -1 })).profile).toBeUndefined();
+  });
+});
+
 // Synthetic, identity-only fixtures: no cookies, signatures or full production payloads.
 const samples = [
   {

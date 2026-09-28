@@ -424,6 +424,17 @@ describe("foreground account homepage entry", () => {
 });
 
 describe("identity checks and attempt feedback", () => {
+  it("returns the refreshed homepage nickname, matching the last emitted sidebar update", async () => {
+    const f = fixture("offline", true, undefined, "xiaohongshu");
+    f.store.accounts.update(f.account.id, { displayName: "旧平台名" });
+    f.viewPool.getState.mockReturnValue({ url: getPlatform("xiaohongshu").routes.site, instanceId: 1, navigationId: 1 } as ViewState);
+    f.viewPool.getWebContents.mockReturnValue(Object.assign(new EventEmitter(), {
+      isDestroyed: () => false, executeJavaScript: vi.fn(async () => ({ kind: "online", source: "homepage", reason: "self", displayName: "新平台名" })),
+    }) as unknown as WebContents);
+    const changed = vi.fn(); f.service.on("account-changed", changed);
+    expect((await f.service.checkStatus(f.account.id, { force: true })).displayName).toBe("新平台名");
+    expect(changed.mock.lastCall![0].displayName).toBe("新平台名");
+  });
   it.each(["douyin", "kuaishou", "xiaohongshu", "bilibili"] as const)(
     "confirms an authenticated %s homepage without cookies, creator requests or profile overwrites",
     async (platformId) => {
@@ -1027,7 +1038,7 @@ describe("AccountService network and authentication separation", () => {
     expect(account.handle).toBe("safe-handle");
     expect(account.status).toBe("online");
     expect(f.store.accounts.get(account.id)?.avatarUrl).toBeNull();
-    expect(f.mediaIntake.avatar).toHaveBeenCalledExactlyOnceWith(account.id, source);
+    expect(f.mediaIntake.avatar).toHaveBeenCalledExactlyOnceWith(account.id, source, { refresh: true });
   });
 
   it("offers the verified Channels identity avatar even when no collector refresh is run", async () => {
@@ -1040,7 +1051,7 @@ describe("AccountService network and authentication separation", () => {
     });
     const result = await f.service.checkStatus(f.account.id, { force: true });
     expect(result.status).toBe("online");
-    expect(f.mediaIntake.avatar).toHaveBeenCalledExactlyOnceWith(f.account.id, avatarUrl);
+    expect(f.mediaIntake.avatar).toHaveBeenCalledExactlyOnceWith(f.account.id, avatarUrl, { refresh: true });
     expect(result.avatarUrl).toBeNull();
     expect(f.store.accounts.get(f.account.id)?.avatarUrl).toBeNull();
     expect(JSON.stringify(f.store.audit.list())).not.toContain("signature");
@@ -1290,6 +1301,59 @@ describe("AccountService network and authentication separation", () => {
     expect(result.displayName).toBe("Fixture creator");
     expect(result.handle).toBe("fixture-handle");
     expect(f.store.accounts.get(f.account.id)?.displayName).toBe("Fixture creator");
+  });
+
+  it.each(["douyin", "kuaishou", "xiaohongshu", "bilibili", "baijiahao", "weixin_channels"] as const)(
+    "syncs %s's renamed self profile without turning creator identity into homepage login", platform => {
+      const f = fixture("offline", true, undefined, platform);
+      f.store.accounts.update(f.account.id, { displayName: "旧昵称", externalId: "self" });
+      f.viewPool.getState.mockReturnValue({ url: getPlatform(platform).routes.home, instanceId: 1, navigationId: 1 } as ViewState);
+      const avatarUrl = "https://media.example.test/new.jpg";
+      const evidence = { kind: "online" as const, subject: "self", key: "fresh-profile", sequence: 1, observedAt: Date.now(), reason: "self",
+        profile: { externalId: "self", displayName: "新昵称", avatarUrl } };
+      f.viewPool.getIdentityEvidence.mockReturnValue(evidence);
+      const online = vi.fn(); f.service.on("account-online", online);
+      f.service.onActivity(f.account.id, "identity");
+      expect(f.service.get(f.account.id)).toMatchObject({ displayName: "新昵称", status: "offline", externalId: "self", avatarUrl: null });
+      expect(f.mediaIntake.avatar).toHaveBeenCalledExactlyOnceWith(f.account.id, avatarUrl, { refresh: true });
+      f.service.onActivity(f.account.id, "identity");
+      expect(f.mediaIntake.avatar).toHaveBeenCalledTimes(1);
+      expect(online).not.toHaveBeenCalled();
+      expect(f.session.fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not restore an old name/avatar after a newer passive profile arrives during a scan", async () => {
+    const f = fixture("online", true, undefined, "bilibili");
+    f.viewPool.getState.mockReturnValue({ url: "https://www.bilibili.com/", instanceId: 1, navigationId: 1 } as ViewState);
+    const reply = deferred<ProfileInfo | null>();
+    f.fetchProfile.mockReturnValue(reply.promise);
+    const pending = f.service.refreshProfile(f.account.id);
+    f.service.syncProfile(f.account.id, { displayName: "刚改的新名", avatarUrl: "https://i0.hdslb.com/new.jpg" });
+    reply.resolve({ displayName: "旧名", avatarUrl: "https://i0.hdslb.com/old.jpg" });
+    expect((await pending).displayName).toBe("刚改的新名");
+    expect(f.mediaIntake.avatar).toHaveBeenCalledExactlyOnceWith(f.account.id, "https://i0.hdslb.com/new.jpg", { refresh: true });
+  });
+
+  it("refreshes an unchanged avatar source even when the profile has no changed database fields", async () => {
+    const f = fixture("online");
+    f.fetchProfile.mockResolvedValue({ avatarUrl: "https://media.example.test/same.jpg" });
+    await f.service.refreshProfile(f.account.id);
+    await f.service.refreshProfile(f.account.id);
+    expect(f.mediaIntake.avatar).toHaveBeenCalledTimes(2);
+    expect(f.mediaIntake.avatar).toHaveBeenLastCalledWith(f.account.id, "https://media.example.test/same.jpg", { refresh: true });
+  });
+
+  it("observes only the visible homepage on the local profile interval and stops on disposal", async () => {
+    const f = fixture("offline", true, undefined, "bilibili");
+    f.viewPool.getState.mockReturnValue({ url: "https://www.bilibili.com/", visible: true } as ViewState);
+    const check = vi.spyOn(f.service, "checkStatus").mockResolvedValue(f.account);
+    f.service.startPatrol(); await vi.advanceTimersByTimeAsync(15_000);
+    expect(check).toHaveBeenCalledWith(f.account.id, { skipProbe: true, silent: true, force: true });
+    check.mockClear();
+    f.viewPool.getState.mockReturnValue({ url: "https://www.bilibili.com/", visible: true, messageMode: true } as ViewState);
+    await vi.advanceTimersByTimeAsync(15_000); expect(check).not.toHaveBeenCalled();
+    f.service.dispose(); await vi.advanceTimersByTimeAsync(15_000); expect(check).not.toHaveBeenCalled();
   });
 
   it.each([
