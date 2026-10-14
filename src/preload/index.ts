@@ -357,6 +357,7 @@ const api: WorkbenchApi = {
     navigate: (id, url) => invoke(IPC.viewNavigate, id, url),
     go: (id, route) => invoke(IPC.viewGo, id, route),
     reload: (id) => invoke(IPC.viewReload, id),
+    reconnect: (id) => invoke(IPC.viewReconnect, id),
     back: (id) => invoke(IPC.viewBack, id),
     forward: (id) => invoke(IPC.viewForward, id),
     stop: (id) => invoke(IPC.viewStop, id),

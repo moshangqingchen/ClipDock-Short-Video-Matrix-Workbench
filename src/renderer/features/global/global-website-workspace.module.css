@@ -158,10 +158,12 @@
   min-width: 0;
   min-height: 0;
 }
+.publishAside { width: min(340px, 38%); flex-shrink: 0; overflow-y: auto; border-left: 1px solid var(--line); background: var(--bg-elev); }
 @media (max-width: 1050px) {
   .body {
     flex-direction: column;
   }
+  .publishAside { width: 100%; max-height: 40%; border-left: 0; border-top: 1px solid var(--line); }
 }
 .viewport {
   position: absolute;

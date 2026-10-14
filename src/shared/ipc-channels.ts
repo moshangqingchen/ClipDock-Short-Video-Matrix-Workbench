@@ -55,6 +55,7 @@ export const IPC = {
   viewGo: "views:go",
   viewOpenMessages: "views:open-messages",
   viewReload: "views:reload",
+  viewReconnect: "views:reconnect",
   viewBack: "views:back",
   viewForward: "views:forward",
   viewStop: "views:stop",

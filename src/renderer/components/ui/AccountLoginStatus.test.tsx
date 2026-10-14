@@ -20,6 +20,27 @@ const account = {
 
 afterEach(cleanup);
 
+it("keeps compact account rows to one status while retaining the check explanation", () => {
+  const checked = { ...account, checkInfo: { state: "paused" as const, reason: "本次检查等待网络恢复", attemptedAt } };
+  const { rerender } = render(<AccountLoginStatus compact account={checked} />);
+  expect(screen.getByText("在线")).toHaveAttribute("title", expect.stringContaining("本次检查等待网络恢复"));
+  expect(screen.queryByText("网络暂停")).not.toBeInTheDocument();
+  rerender(<AccountLoginStatus detailed account={checked} />);
+  expect(screen.getByText("在线")).toBeInTheDocument();
+  expect(screen.getByText("网络暂停")).toBeInTheDocument();
+});
+
+it("shows an online homepage alongside an offline creator console and the independent check result", () => {
+  render(<AccountLoginStatus detailed account={{ ...account, platformId: "kuaishou", checkInfo: {
+    state: "paused", reason: "网络正在恢复", attemptedAt,
+    creatorConfirmation: { kind: "offline", observedAt: Date.parse(confirmedAt) },
+  } }} />);
+  expect(screen.getByText("在线")).toBeInTheDocument();
+  expect(screen.getByText("网络暂停")).toBeInTheDocument();
+  expect(screen.getByText(/管理后台：需要登录/)).toBeInTheDocument();
+  expect(screen.getByText(/主页最近确认/)).toHaveTextContent(new Date(confirmedAt).toLocaleString());
+});
+
 it.each<[AccountStatus, string]>([
   ["online", "在线"],
   ["expiring", "即将过期"],

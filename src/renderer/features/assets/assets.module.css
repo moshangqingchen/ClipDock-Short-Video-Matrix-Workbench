@@ -25,6 +25,27 @@
   border-color: var(--brand-500);
   box-shadow: 0 0 0 3px rgba(38, 115, 255, 0.15);
 }
+.assetSelect {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  border: 0;
+}
+.toolbar, .pagination, .notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+.toolbar select { padding: 7px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg-elev); color: var(--fg); }
+.pagination { justify-content: center; margin-top: 20px; }
 .thumb {
   position: relative;
   aspect-ratio: 4 / 5;
@@ -81,15 +102,13 @@
   color: var(--fg-muted);
 }
 .actions {
-  position: absolute;
-  right: 12px;
-  bottom: 44px;
   display: flex;
+  justify-content: flex-end;
   gap: 4px;
-  opacity: 0;
+  opacity: 0.8;
   transition: opacity var(--dur-fast) var(--ease);
 }
-.asset:hover .actions {
+.asset:hover .actions, .asset:focus-within .actions {
   opacity: 1;
 }
 .actions button {

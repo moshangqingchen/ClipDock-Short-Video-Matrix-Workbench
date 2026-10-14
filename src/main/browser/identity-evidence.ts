@@ -11,6 +11,31 @@ export interface IdentityEvidence extends IdentityVerdict {
   key: string;
   sequence: number;
   observedAt: number;
+  httpStatus?: number;
+  platformCode?: number;
+  /** Allowlisted identity endpoint path, without query, fragment or account information. */
+  endpoint?: string;
+}
+
+/** Diagnostics contain only bounded numeric codes and a reviewed endpoint pathname. */
+export function identityResponseMetadata(platform: PlatformId, url: string, status: number, text: string):
+  Pick<IdentityEvidence, "httpStatus" | "platformCode" | "endpoint"> {
+  if (!isIdentityEndpoint(platform, url)) return {};
+  const metadata: Pick<IdentityEvidence, "httpStatus" | "platformCode" | "endpoint"> = {
+    endpoint: new URL(url).pathname,
+    ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { httpStatus: status } : {}),
+  };
+  try {
+    if (text.length > 262144) return metadata;
+    const root = record(JSON.parse(text));
+    const raw = platform === "weixin_channels" ? root.errCode ?? record(root.base_resp).ret
+      : platform === "kuaishou" ? root.result
+      : platform === "douyin" ? root.status_code
+      : platform === "baijiahao" ? root.errno : root.code;
+    const numeric = typeof raw === "number" ? raw : typeof raw === "string" && /^-?\d{1,10}$/.test(raw) ? Number(raw) : NaN;
+    if (Number.isSafeInteger(numeric) && Math.abs(numeric) <= 2147483647) metadata.platformCode = numeric;
+  } catch { /* Malformed responses can still have useful HTTP status metadata. */ }
+  return metadata;
 }
 
 const paths: Partial<Record<PlatformId, { host: string; paths: string[] }>> = {

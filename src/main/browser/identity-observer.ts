@@ -2,7 +2,7 @@ import type { WebContents } from "electron";
 import type { PlatformId } from "@shared/platforms";
 import { canUseBusinessNetwork } from "@main/network/business-access";
 import { acquireDebugger } from "./debugger-lease";
-import { isIdentityEndpoint, parseIdentityResponse, type IdentityEvidence } from "./identity-evidence";
+import { isIdentityEndpoint, parseIdentityResponse, identityResponseMetadata, type IdentityEvidence } from "./identity-evidence";
 
 interface Pending {
   url: string;
@@ -136,6 +136,7 @@ export class IdentityObserver {
       else if (verdict.kind === "offline") this.subject = null;
       this.evidence = {
         ...verdict,
+        ...identityResponseMetadata(this.platform, pending.url, pending.status!, text),
         sequence: pending.sequence,
         observedAt: Date.now(),
         key: `${this.contents.id}:${this.epoch}:${pending.sequence}`,

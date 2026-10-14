@@ -56,3 +56,9 @@ it("account selection follows the current metrics page in either scope", () => {
     globalMetricsDetail: true,
   });
 });
+
+it("opening platform metrics clears a previously selected account detail", () => {
+  useUi.setState({ route: "overview", creatorMode: "global", metricsAccountId: "old-douyin-account", metricsPlatform: "douyin" });
+  useUi.getState().openPlatformMetrics("kuaishou");
+  expect(useUi.getState()).toMatchObject({ route: "metrics", creatorMode: "domestic", metricsPlatform: "kuaishou", metricsAccountId: null });
+});

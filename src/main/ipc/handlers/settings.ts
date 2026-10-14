@@ -29,6 +29,8 @@ export function registerSettingsHandlers(ipc: IpcRegistrar, deps: SettingsHandle
     chrome: process.versions.chrome ?? "",
     userDataPath: app.getPath("userData"),
     userAgent: chromeUserAgent(),
+    dataMode: process.env.SV_WORKBENCH_DATA_DIR?.trim() ? "custom" : "default",
+    executablePath: app.getPath("exe"),
   }));
   ipc.handle(IPC.openExternal, async (_e, url: unknown) => {
     if (typeof url !== "string") return;

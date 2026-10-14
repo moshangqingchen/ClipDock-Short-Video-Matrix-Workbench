@@ -52,6 +52,25 @@ const sessionCookie = (domain: string, name: string): Cookie =>
   }) as Cookie;
 
 describe("CookieGuard", () => {
+  it("records auth-cookie expiry metadata without copying the secret into diagnostics", () => {
+    const fake = fakeSession();
+    const events: unknown[] = [];
+    const guard = new CookieGuard(fake.session, "weixin_channels", { onDiagnostic: event => events.push(event) });
+    fake.emit({ ...sessionCookie("channels.weixin.qq.com", "sessionid"), value: "private-session-value", session: false }, true);
+    expect(events).toEqual([expect.objectContaining({ phase: "change", cause: "explicit", removed: true, cookies: [expect.objectContaining({ name: "sessionid", domain: "channels.weixin.qq.com" })] })]);
+    expect(JSON.stringify(events)).not.toContain("private-session-value");
+    guard.dispose();
+  });
+  it("notifies checks when the current Kuaishou homepage token changes", async () => {
+    vi.useFakeTimers();
+    const fake = fakeSession(), changed = vi.fn();
+    const guard = new CookieGuard(fake.session, "kuaishou", { onSessionCookiesChanged: changed });
+    try {
+      fake.emit({ ...sessionCookie("www.kuaishou.com", "kuaishou.server.webday7_st"), session: false }, false);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(changed).toHaveBeenCalledOnce();
+    } finally { guard.dispose(); vi.useRealTimers(); }
+  });
   it.each(["sessionid", "__Host-session"])("preserves host-only scope for %s", async (name) => {
     const fake = fakeSession(), guard = new CookieGuard(fake.session, "weixin_channels");
     fake.emit({ ...sessionCookie("channels.weixin.qq.com", name), hostOnly: true });

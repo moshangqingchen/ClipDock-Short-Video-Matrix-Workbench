@@ -5,7 +5,19 @@ import type { AccountService } from "@main/services/account-service";
 import type { IpcRegistrar } from "../register";
 import { openOfficialMessages } from "@main/browser/open-messages";
 
-export function registerViewHandlers(ipc: IpcRegistrar, pool: ViewPool, accounts: AccountService): void {
+export function registerViewHandlers(ipc: IpcRegistrar, pool: ViewPool, accounts: AccountService,
+  reconnect?: (accountId: string) => Promise<void>): void {
+  const reconnectFlights = new Map<string, Promise<void>>();
+  ipc.handleValidated(IPC.viewReconnect, accountIdSchema, async (_e, id) => {
+    accounts.get(id);
+    if (!reconnect) throw new Error("连接恢复暂不可用，请重新检查网络");
+    const existing = reconnectFlights.get(id);
+    if (existing) return existing;
+    const task = Promise.resolve().then(() => reconnect(id));
+    reconnectFlights.set(id, task);
+    try { await task; }
+    finally { if (reconnectFlights.get(id) === task) reconnectFlights.delete(id); }
+  });
   const messageFlights = new Map<string, ReturnType<typeof openOfficialMessages>>();
   ipc.handleValidated(IPC.viewOpenMessages, accountIdSchema, async (_e, id) => {
     const existing = messageFlights.get(id);

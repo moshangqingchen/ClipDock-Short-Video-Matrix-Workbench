@@ -913,7 +913,28 @@ async function verifyDomesticOptimization() {
     await command('Network.emulateNetworkConditions', {offline:false,latency:0,downloadThroughput:-1,uploadThroughput:-1}, sessionId);
     await command('Target.detachFromTarget', {sessionId});
   }
-  console.log('domestic optimization smoke: 960/1120/1440/1920 px; six packaged logos; 52/40 px hierarchy; search/collapse; IPC check feedback and deduplication');
+  await evaluate(`document.querySelector('button[aria-label="展开辅助面板"]').click()`);
+  await sleep(200);
+  await evaluate(`[...document.querySelectorAll('[role="tab"]')].find(button=>button.textContent==='发布助手').click()`);
+  for (const [width, height] of [[960, 640], [1440, 900]]) {
+    await command('Emulation.setDeviceMetricsOverride', {width,height,deviceScaleFactor:1,mobile:false});
+    await sleep(600);
+    const geometry = await evaluate(`(() => {
+      const assist=document.querySelector('section[aria-label="发布辅助"]');
+      const drawer=assist?.parentElement.getBoundingClientRect();
+      const host=document.querySelector('[data-view-host]')?.getBoundingClientRect();
+      return {ready:!!assist,overflow:document.documentElement.scrollWidth>innerWidth,
+        nativeWidth:host?.width,nativeHeight:host?.height,
+        separated:!!drawer&&!!host&&(innerWidth<=1050?host.bottom<=drawer.top+1:host.right<=drawer.left+1)};
+    })()`);
+    if (!geometry.ready || geometry.overflow || !geometry.separated || geometry.nativeWidth<300 || geometry.nativeHeight<100)
+      throw new Error('publish assistance/native-page layout failed: '+JSON.stringify({width,height,...geometry}));
+    const shot=await command('Page.captureScreenshot',{format:'png'});
+    fs.writeFileSync(path.resolve(`output/optimization/publish-assist-${width}.png`),Buffer.from(shot.data,'base64'));
+  }
+  await evaluate(`document.querySelector('button[aria-label="关闭辅助面板"]').click()`);
+  await sleep(300);
+  console.log('domestic optimization smoke: 960/1120/1440/1920 px; six packaged logos; hierarchy; search/collapse; check feedback; 960/1440 publish assistance and native-page separation');
 }
 
 async function verifyMessagesWorkspace() {

@@ -301,6 +301,7 @@
 .accountMeta {
   flex: 1;
   min-width: 0;
+  line-height: 16px;
 }
 .accountMeta strong {
   display: block;
@@ -320,7 +321,7 @@
   flex: 0 1 auto;
   min-width: 0;
 }
-.accountMeta span {
+.accountMeta > span {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -329,6 +330,15 @@
   color: var(--fg-muted);
   white-space: nowrap;
   overflow: hidden;
+}
+.accountSummary > :first-child {
+  flex: 0 0 auto;
+}
+.accountFollowers {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .globalStatusDot {
   display: inline-block;

@@ -42,6 +42,17 @@ export function SettingsPage() {
       </div>
 
       <div className={styles.sections}>
+        <Card>
+          <div className={styles.sectionHead}>
+            <h3>当前工作台与账号数据</h3>
+            <p>{info?.dataMode === "custom" ? "当前使用指定数据目录。使用其他启动入口时，请核对目录一致，账号和登录环境都保存在这里。" : "当前使用本机默认数据目录。正常更新程序会继续使用这里的账号与登录环境。"}</p>
+          </div>
+          <dl className={styles.info}>
+            <dt>当前版本</dt><dd>{info?.version ?? "读取中…"}</dd>
+            <dt>数据目录</dt><dd>{info?.userDataPath ?? "读取中…"}</dd>
+            <dt>程序位置</dt><dd>{info?.executablePath ?? "浏览器预览"}</dd>
+          </dl>
+        </Card>
         <NetworkPanel />
         <GlobalAppsPanel />
         <Card>
@@ -75,10 +86,10 @@ export function SettingsPage() {
           <div className={styles.sectionHead}>
             <h3>浏览器环境</h3>
             <p>
-              每个账号的页面常驻内存,切换零加载;超过上限时最久未用且不在登录页的页面会被释放(登录态不受影响)。
+              优先保留当前操作、扫码与消息页面；普通后台页面可休眠或释放，重新打开时使用原账号环境。
             </p>
           </div>
-          <Row title="同时常驻的账号页面数" description="每个页面约占用 150–300 MB 内存。内存充足可调高。">
+          <Row title="普通常驻页面数量" description="扫码、消息等受保护页面可能使实际数量超过此值。降低数量可减少内存占用。">
             <Stepper
               value={settings.maxLiveViews}
               min={2}
@@ -90,7 +101,7 @@ export function SettingsPage() {
 
         <Card>
           <div className={styles.sectionHead}>
-            <h3>数据采集与保活</h3>
+            <h3>数据采集与登录复核</h3>
             <p>采集在账号自己的登录会话内以只读方式进行,与你在页面里点开数据页等价。</p>
           </div>
           <Row
@@ -109,12 +120,12 @@ export function SettingsPage() {
             />
           </Row>
           <Row
-            title="会话保活"
-            description="定期检查登录状态；视频号会在不打断当前操作时访问管理首页复核，实际登录有效期由平台决定。"
+            title="定期复核登录"
+            description="工作台运行时定期检查；视频号会在不打断当前操作时访问管理首页。退出程序后停止，检查成功不代表平台延长了登录有效期。"
           >
             <Switch checked={settings.keepaliveEnabled} onChange={(v) => set("keepaliveEnabled", v)} />
           </Row>
-          <Row title="保活间隔(小时)">
+          <Row title="登录复核间隔(小时)">
             <Stepper
               value={settings.keepaliveIntervalHours}
               min={2}

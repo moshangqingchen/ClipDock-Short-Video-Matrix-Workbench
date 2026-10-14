@@ -4,6 +4,23 @@
   gap: 16px;
   align-items: start;
 }
+.draftStatus {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+.draftStatus[role="alert"] { color: var(--danger); border-color: var(--danger); }
+.assist { padding: 16px; display: grid; gap: 14px; align-content: start; overflow-y: auto; min-height: 0; }
+.assist p { color: var(--fg-muted); font-size: var(--text-sm); line-height: 1.6; }
+.assistText { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: var(--bg-sunken); border-radius: var(--r-sm); max-height: 220px; overflow-y: auto; }
+.assistFiles { display: grid; gap: 6px; padding-left: 18px; font-size: var(--text-sm); overflow-wrap: anywhere; }
 @media (max-width: 1200px) {
   .layout {
     grid-template-columns: 1fr;

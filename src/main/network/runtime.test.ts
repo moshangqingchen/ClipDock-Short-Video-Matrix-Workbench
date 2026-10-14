@@ -425,6 +425,87 @@ describe("NetworkRuntime exclusive access", () => {
     expect(f.session.clearStorageData).toHaveBeenCalled();
   });
 
+  it("repairs failed cleanup only after all native teardown completes and retains login storage", async () => {
+    const f = fixture();
+    const before = f.register();
+    await before.ready;
+    const oldLease = f.runtime.acquire("exclusive-account")!;
+    f.session.clearStorageData.mockRejectedValueOnce(new Error("worker cleanup failed"));
+    f.update({ state: "overseas", proxy: "on", reason: "PROXY_ENABLED", generation: 2 });
+    await expect(f.register().ready).rejects.toThrow("ACCOUNT_SESSION_PROTECTION_FAILED");
+    f.update({ state: "domestic", proxy: "off", reason: "READY", generation: 3 });
+    await expect(f.register().ready).rejects.toThrow("ACCOUNT_SESSION_PROTECTION_FAILED");
+    const closing = deferred();
+    const pageClosing = deferred();
+    const dnsBefore = f.session.clearHostResolverCache.mock.calls.length;
+    f.runtime.setSuspendHandler(() => pageClosing.promise);
+    f.session.closeAllConnections.mockReturnValueOnce(closing.promise);
+    const repairing = f.runtime.reconnectAccount("exclusive-account");
+    expect(f.runtime.reconnectAccount("exclusive-account")).toBe(repairing);
+    await settle();
+    expect(f.runtime.check("exclusive-account").allowed).toBe(false);
+    expect(oldLease.isCurrent()).toBe(false);
+    closing.resolve();
+    await settle();
+    expect(f.session.clearHostResolverCache).toHaveBeenCalledTimes(dnsBefore);
+    pageClosing.resolve();
+    await repairing;
+    const after = f.register();
+    await after.ready;
+    expect(after.contextId).not.toBe(before.contextId);
+    expect(f.runtime.check("exclusive-account").allowed).toBe(true);
+    expect(f.runtime.listProofScopes()).toEqual([]);
+    expect(f.session.clearStorageData.mock.calls.every(([options]) =>
+      JSON.stringify(options) === JSON.stringify({ storages: ["serviceworkers"] }))).toBe(true);
+    expect(f.session.setProxy).toHaveBeenLastCalledWith({ mode: "direct" });
+  });
+
+  it("leaves a failed repair closed and permits a later explicit retry", async () => {
+    const f = fixture();
+    await f.register().ready;
+    f.session.closeAllConnections.mockRejectedValue(new Error("native failure"));
+    f.update({ state: "domestic", generation: 2 });
+    await expect(f.register().ready).rejects.toThrow("ACCOUNT_SESSION_PROTECTION_FAILED");
+    await expect(f.runtime.reconnectAccount("exclusive-account")).rejects.toThrow("SESSION_RECONNECT_CLEANUP_FAILED");
+    expect(f.runtime.check("exclusive-account").allowed).toBe(false);
+    f.session.closeAllConnections.mockResolvedValue(undefined);
+    await f.runtime.reconnectAccount("exclusive-account");
+    expect(f.runtime.check("exclusive-account").allowed).toBe(true);
+  });
+
+  it("does not revive an account removed while explicit repair is waiting", async () => {
+    const f = fixture();
+    await f.register().ready;
+    f.session.closeAllConnections.mockRejectedValueOnce(new Error("native failure"));
+    f.update({ state: "domestic", generation: 2 });
+    await expect(f.register().ready).rejects.toThrow("ACCOUNT_SESSION_PROTECTION_FAILED");
+    const closing = deferred();
+    f.session.closeAllConnections.mockReturnValueOnce(closing.promise);
+    const repairing = f.runtime.reconnectAccount("exclusive-account");
+    const rejected = expect(repairing).rejects.toThrow("ACCOUNT_RECONNECT_SUPERSEDED");
+    await settle();
+    const removing = f.runtime.removeAccount("exclusive-account");
+    const removal = Promise.allSettled([removing]);
+    closing.resolve();
+    await rejected;
+    await removal;
+    expect(f.runtime.getAccountStates()).toEqual([]);
+    expect(f.runtime.checkSessionRequest(f.session.session, "https://api.bilibili.com/").cancel).toBe(true);
+    await expect(f.runtime.reconnectAccount("exclusive-account")).rejects.toThrow("ACCOUNT_RECONNECT_UNAVAILABLE");
+  });
+
+  it("does not close healthy pages for a reconnect request", async () => {
+    const f = fixture();
+    const before = f.register();
+    await before.ready;
+    f.suspend.mockClear();
+    f.session.closeAllConnections.mockClear();
+    await f.runtime.reconnectAccount("exclusive-account");
+    expect(f.suspend).not.toHaveBeenCalled();
+    expect(f.session.closeAllConnections).not.toHaveBeenCalled();
+    expect(f.register().contextId).toBe(before.contextId);
+  });
+
   it("disposes idempotently, aborts tasks synchronously and waits for pending page teardown", async () => {
     const f = fixture();
     await f.register().ready;

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, ClipboardCopy, ExternalLink, FileUp, Plus, Send, Trash2, X } from "lucide-react";
 import { PLATFORMS, type PlatformId, type GlobalPlatformId } from "@shared/platforms";
 import type { PublishRecord as DomesticPublishRecord, PublishRecordInput } from "@shared/types";
@@ -20,14 +20,13 @@ import {
 import { api, hasBridge } from "@renderer/lib/api";
 import { useAccounts, useGlobalAccounts, useToasts, useUi } from "@renderer/store";
 import { AssetGrid, useAssets } from "@renderer/features/assets/AssetsPage";
+import { DRAFT_CHANGED, readPublishDraft, savePublishDraft, type PublishDraft } from "@renderer/lib/publish-drafts";
 import layout from "@renderer/features/layout/layout.module.css";
 import styles from "./publish.module.css";
 
 type PublishRecord = Omit<DomesticPublishRecord, "platformId"> & {
   platformId: PlatformId | GlobalPlatformId;
 };
-type Draft = { title: string; description: string; tags: string[]; selected: string[]; recordId?: string };
-const drafts = new Map<string, Draft>();
 const composerPlatform = (id: PublishRecord["platformId"]) => {
   if (id in PLATFORMS) return PLATFORMS[id as keyof typeof PLATFORMS];
   const name = { youtube: "YouTube", tiktok: "TikTok", x: "X" }[id as "youtube" | "tiktok" | "x"];
@@ -66,11 +65,12 @@ function PublishComposer({
       ? domestic
       : global.map((row) => ({ ...row, avatarUrl: null, status: identities[row.id]?.status ?? "unknown" }));
   const publisher = scope === "global" ? globalPublisher : api.publish;
-  const draftKey = `${scope}:${currentAccountId}`;
-  const initialDraft = drafts.get(draftKey);
+  const [draftState, setDraftState] = useState(() => currentAccountId
+    ? readPublishDraft(scope, currentAccountId) : { draft: null, error: null, savedAt: null });
+  const initialDraft = draftState.draft;
   const activeId = currentAccountId;
   const openAccount = scope === "global" ? useUi.getState().openGlobalAccount : useUi.getState().openAccount;
-  const { assets, reload } = useAssets();
+  const { assets, reload, error: assetsError, loading: assetsLoading } = useAssets();
 
   const chosenAccountId = activeId;
   const setAccountId = (id: string) =>
@@ -89,21 +89,56 @@ function PublishComposer({
   ]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [records, setRecords] = useState<PublishRecord[]>([]);
+  const [recordsError, setRecordsError] = useState(false);
+  const [recordsLoading, setRecordsLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [recordId, setRecordId] = useState<string | undefined>(initialDraft?.recordId);
+  const lifetime = useRef({ active: true });
+  useEffect(() => {
+    const current = lifetime.current;
+    current.active = true;
+    return () => { current.active = false; };
+  }, []);
 
   const account = accounts.find((a) => a.id === accountId) ?? null;
   const platform = account ? composerPlatform(account.platformId) : null;
+  const draft = useMemo<PublishDraft>(() => ({ title, description, tags, selected, recordId }),
+    [title, description, tags, selected, recordId]);
+  const lastDraft = useRef(JSON.stringify(initialDraft ?? { title: "", description: "", tags: [], selected: [] }));
+  useEffect(() => { useUi.getState().selectAssets([]); }, []);
   useEffect(() => {
-    drafts.set(draftKey, { title, description, tags, selected, recordId });
-  }, [draftKey, title, description, tags, selected, recordId]);
+    if (!accountId) return;
+    const refresh = () => setDraftState(readPublishDraft(scope, accountId));
+    window.addEventListener(DRAFT_CHANGED, refresh);
+    return () => window.removeEventListener(DRAFT_CHANGED, refresh);
+  }, [scope, accountId]);
+  useEffect(() => {
+    // Preserve an unreadable saved record until the user actually edits or retries.
+    const serialized = JSON.stringify(draft);
+    if (serialized === lastDraft.current) return;
+    lastDraft.current = serialized;
+    if (accountId) savePublishDraft(scope, accountId, draft);
+  }, [scope, accountId, draft]);
 
-  useEffect(() => {
-    void publisher
-      .list()
-      .then(setRecords)
-      .catch(() => undefined);
+  const recordRequest = useRef(0);
+  const loadRecords = useCallback(async () => {
+    const request = ++recordRequest.current;
+    setRecordsLoading(true);
+    try {
+      const rows = await publisher.list();
+      if (request === recordRequest.current) { setRecords(rows); setRecordsError(false); }
+    } catch {
+      if (request === recordRequest.current) setRecordsError(true);
+    } finally {
+      if (request === recordRequest.current) setRecordsLoading(false);
+    }
   }, [publisher]);
+  const invalidateRecords = useCallback(() => { recordRequest.current++; }, []);
+  useEffect(() => {
+    let active = true;
+    void Promise.resolve().then(() => { if (active) void loadRecords(); });
+    return () => { active = false; invalidateRecords(); };
+  }, [loadRecords, invalidateRecords]);
 
   const selectedAssets = useMemo(
     () => (assets ?? []).filter((a) => selected.includes(a.id)),
@@ -143,8 +178,11 @@ function PublishComposer({
         tags,
         status,
       });
+      const latest = readPublishDraft(scope, account.id).draft ?? draft;
+      savePublishDraft(scope, account.id, { ...latest, recordId: record.id });
+      if (!lifetime.current.active) return;
       setRecordId(record.id);
-      setRecords(await publisher.list());
+      await loadRecords();
       useToasts
         .getState()
         .push({ kind: "success", title: status === "published" ? "已记录为已发布" : "发布计划已保存" });
@@ -158,8 +196,12 @@ function PublishComposer({
   const openUpload = async () => {
     if (!account) return;
     setBusy("open");
+    setDraftState(savePublishDraft(scope, account.id, draft));
     try {
       await publisher.openUpload(account.id);
+      if (!lifetime.current.active) return;
+      useUi.getState().setDrawerTab("publish");
+      useUi.getState().toggleDrawer(true);
       openAccount(account.id);
     } catch (error) {
       useToasts
@@ -173,14 +215,18 @@ function PublishComposer({
   const attach = async () => {
     if (!account || selected.length === 0) return;
     setBusy("attach");
+    setDraftState(savePublishDraft(scope, account.id, draft));
     try {
       const result = await publisher.attachFiles(account.id, selected);
+      if (!lifetime.current.active) return;
       if (result.attached > 0) {
         useToasts.getState().push({
           kind: "success",
           title: `已将 ${result.attached} 个文件填入上传控件`,
           message: "请在账号页面继续完成发布",
         });
+        useUi.getState().setDrawerTab("publish");
+        useUi.getState().toggleDrawer(true);
         openAccount(account.id);
       } else {
         useToasts.getState().push({
@@ -197,7 +243,7 @@ function PublishComposer({
   };
 
   const loadRecord = (record: PublishRecord) => {
-    drafts.set(`${scope}:${record.accountId}`, {
+    savePublishDraft(scope, record.accountId, {
       title: record.title,
       description: record.description,
       tags: record.tags,
@@ -236,6 +282,11 @@ function PublishComposer({
           ) : null}
         </div>
       </div>
+
+      {accountId && <div role={draftState.error ? "alert" : "status"} className={styles.draftStatus}>
+        <span>{draftState.error ?? (draftState.savedAt ? `草稿已自动保存 · ${formatDateTime(draftState.savedAt)}` : "编辑后自动保存到本机，重启可继续")}</span>
+        {draftState.error && <Button size="sm" onClick={() => setDraftState(savePublishDraft(scope, accountId, draft))}>重试保存</Button>}
+      </div>}
 
       {accounts.length === 0 ? (
         <EmptyState
@@ -306,6 +357,7 @@ function PublishComposer({
               <Field label="话题标签" hint="回车添加,复制文案时自动带上 #。">
                 <TextInput
                   value={tagInput}
+                  maxLength={200}
                   placeholder="输入标签后回车"
                   onChange={(e) => setTagInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -439,7 +491,11 @@ function PublishComposer({
             <strong style={{ fontSize: "var(--text-sm)" }}>发布记录</strong>
             <span style={{ fontSize: "var(--text-xs)", color: "var(--fg-muted)" }}>{records.length} 条</span>
           </div>
-          {records.length === 0 ? (
+          {recordsError && <div role="alert" className={styles.draftStatus}>
+            <span>发布记录读取失败。{records.length ? "已保留上次结果。" : "请重试读取。"}</span>
+            <Button size="sm" loading={recordsLoading} onClick={loadRecords}>重试读取记录</Button>
+          </div>}
+          {recordsLoading && !records.length ? <p role="status" className={styles.draftStatus}>正在读取发布记录…</p> : records.length === 0 && !recordsError ? (
             <EmptyState
               icon={Send}
               title="还没有发布记录"
@@ -480,9 +536,13 @@ function PublishComposer({
                     icon={Trash2}
                     label="删除记录"
                     onClick={async () => {
-                      await publisher.delete(record.id);
-                      setRecords(await publisher.list());
-                      if (recordId === record.id) resetForm();
+                      try {
+                        await publisher.delete(record.id);
+                        await loadRecords();
+                        if (recordId === record.id) resetForm();
+                      } catch (error) {
+                        useToasts.getState().push({ kind: "error", title: "删除记录失败", message: (error as Error).message });
+                      }
                     }}
                   />
                 </div>
@@ -501,12 +561,19 @@ function PublishComposer({
           <>
             <Button
               variant="ghost"
+              loading={busy === "import"}
               onClick={async () => {
-                const added = await api.assets.import();
-                if (added.length) {
-                  await reload();
-                  setSelected([...selected, ...added.map((a) => a.id)]);
-                }
+                setBusy("import");
+                try {
+                  const added = await api.assets.import();
+                  if (!lifetime.current.active) return;
+                  if (added.length) {
+                    await reload();
+                    setSelected(previous => [...new Set([...previous, ...added.map((a) => a.id)])]);
+                  }
+                } catch (error) {
+                  useToasts.getState().push({ kind: "error", title: "导入素材失败", message: (error as Error).message });
+                } finally { setBusy(null); }
               }}
             >
               导入新素材
@@ -517,8 +584,10 @@ function PublishComposer({
           </>
         }
       >
+        {assetsError && <div role="alert" className={styles.draftStatus}><span>素材读取失败，已保留已有列表。</span><Button size="sm" loading={assetsLoading} onClick={reload}>重试读取素材</Button></div>}
         <AssetGrid
           assets={assets}
+          loading={assetsLoading}
           onChanged={reload}
           selectable
           selected={selected}

@@ -48,6 +48,8 @@ export interface AccountCheckInfo {
   attemptedAt: string;
   /** Last explicit observation of this account's public homepage; unrelated checks preserve it. */
   homepageConfirmation?: HomepageConfirmation | null;
+  /** Independent creator-console verdict; never confers public-homepage login. */
+  creatorConfirmation?: HomepageConfirmation | null;
 }
 
 export interface HomepageConfirmation {
@@ -90,6 +92,9 @@ export interface ViewState {
   isLoginPage: boolean;
   isVerificationPage: boolean;
   lastError?: string | null;
+  /** An interrupted editor/message/login page needs an explicit user navigation. */
+  recoveryRequired?: boolean;
+  recoveryMessage?: string;
 }
 
 export interface ViewBounds {

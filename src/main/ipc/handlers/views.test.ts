@@ -7,7 +7,7 @@ import { NetworkDormantError } from "@main/network/business-access";
 import { registerViewHandlers } from "./views";
 
 const id = "8e65b156-a2ee-48ac-957e-2f990141c207";
-function fixture(target: string | null) {
+function fixture(target: string | null, reconnect?: (id: string) => Promise<void>) {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const ipc = {
     handle: (channel: string, fn: (...args: unknown[]) => unknown) => handlers.set(channel, fn),
@@ -23,9 +23,32 @@ function fixture(target: string | null) {
     ipc as unknown as IpcRegistrar,
     pool as unknown as ViewPool,
     accounts as unknown as AccountService,
+    reconnect,
   );
   return { accounts, pool, run: (channel: string, ...args: unknown[]) => handlers.get(channel)!(null, id, ...args) };
 }
+
+describe("connection repair", () => {
+  it("coalesces repeated repairs without resetting the account or navigating", async () => {
+    let done!: () => void;
+    const reconnect = vi.fn(() => new Promise<void>(resolve => { done = resolve; }));
+    const f = fixture(null, reconnect);
+    const first = f.run(IPC.viewReconnect), second = f.run(IPC.viewReconnect);
+    await Promise.resolve();
+    expect(reconnect).toHaveBeenCalledExactlyOnceWith(id);
+    expect(f.accounts.showView).not.toHaveBeenCalled();
+    expect(f.accounts.prepareNetworkOperation).not.toHaveBeenCalled();
+    done();
+    await Promise.all([first, second]);
+  });
+  it("propagates repair errors and allows a later retry", async () => {
+    const reconnect = vi.fn().mockRejectedValueOnce(new Error("cleanup still blocked")).mockResolvedValue(undefined);
+    const f = fixture(null, reconnect);
+    await expect(f.run(IPC.viewReconnect)).rejects.toThrow("cleanup still blocked");
+    await expect(f.run(IPC.viewReconnect)).resolves.toBeUndefined();
+    expect(reconnect).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("foreground homepage entry", () => {
   const bounds = { x: 0, y: 0, width: 640, height: 480 };

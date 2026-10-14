@@ -27,6 +27,12 @@ export interface ViewPoolAccount {
   platformId: PlatformId;
 }
 
+export interface ViewRestoration {
+  url: string;
+  requiresAction: boolean;
+  message: string | null;
+}
+
 export interface ViewPoolOptions {
   window: BaseWindow;
   maxLive: number;
@@ -63,6 +69,10 @@ interface LiveView {
   navigated: boolean;
   resourcesReleased: boolean;
   closePromise: Promise<void> | null;
+  closeFailed: boolean;
+  backgroundThrottled: boolean;
+  lastForeground: ViewRestoration | null;
+  pendingUrl: string | null;
 }
 
 export interface ViewPoolEvents {
@@ -85,6 +95,9 @@ export class ViewPool extends EventEmitter {
   private readonly live = new Map<string, LiveView>();
   /** Includes hidden/evicted/closing views until Chromium confirms actual destruction. */
   private readonly owned = new Map<string, Set<LiveView>>();
+  private readonly restorations = new Map<string, ViewRestoration>();
+  private readonly backgroundActivities = new Map<string, number>();
+  private readonly confirmedHomepages = new Set<string>();
   private maxLive: number;
   private disposed = false;
   private revision = 0;
@@ -124,6 +137,34 @@ export class ViewPool extends EventEmitter {
     return entry ? this.toState(entry) : null;
   }
 
+  /** In-memory navigation context only; never save forms, QR URLs or credentials. */
+  getRestoration(accountId: string): ViewRestoration | null {
+    const saved = this.restorations.get(accountId);
+    return saved ? { ...saved } : null;
+  }
+
+  setHomepageLoginConfirmed(accountId: string, confirmed: boolean): void {
+    if (confirmed) this.confirmedHomepages.add(accountId);
+    else this.confirmedHomepages.delete(accountId);
+  }
+
+  /** Collectors/keepalive hold this while page timers are needed, including before view creation. */
+  retainBackgroundActivity(accountId: string): () => void {
+    this.backgroundActivities.set(accountId, (this.backgroundActivities.get(accountId) ?? 0) + 1);
+    const entry = this.live.get(accountId);
+    if (entry) this.updateBackgroundThrottling(entry);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const count = (this.backgroundActivities.get(accountId) ?? 1) - 1;
+      if (count > 0) this.backgroundActivities.set(accountId, count);
+      else this.backgroundActivities.delete(accountId);
+      const current = this.live.get(accountId);
+      if (current) this.updateBackgroundThrottling(current);
+    };
+  }
+
   /** Official messaging owns this page until an explicit user navigation leaves it. */
   setMessageMode(accountId: string, enabled: boolean): void {
     const entry = this.live.get(accountId);
@@ -131,6 +172,7 @@ export class ViewPool extends EventEmitter {
     if (enabled) this.abandonHomepageCheck(accountId);
     if (entry.messageMode === enabled) return;
     entry.messageMode = enabled;
+    this.updateBackgroundThrottling(entry);
     // Invalidate delayed loads before a message navigation is issued. In
     // particular, session initialization may still be holding an old collector load.
     entry.navigationVersion++;
@@ -152,6 +194,7 @@ export class ViewPool extends EventEmitter {
   /** Eligibility only; callers must declare the exact homepage network scope before rechecking. */
   canCheckHomepage(accountId: string, platformId: PlatformId): boolean {
     if (this.disposed || !getPlatform(platformId).routes.site) return false;
+    if (this.restorations.get(accountId)?.requiresAction) return false;
     const entry = this.live.get(accountId);
     if ([...(this.owned.get(accountId) ?? [])].some((owned) =>
       owned !== entry && !owned.webContents.isDestroyed())) return false;
@@ -225,6 +268,7 @@ export class ViewPool extends EventEmitter {
         entry.view.setBounds(HOMEPAGE_CHECK_BOUNDS);
         this.homepageCheckHost.attach(entry.view);
         entry.checkHostAttached = true;
+        this.updateBackgroundThrottling(entry);
         entry.navigated = true;
         navigationVersion = ++entry.navigationVersion;
         const temporary = this.homepageCheckEntries.get(account.id);
@@ -297,7 +341,8 @@ export class ViewPool extends EventEmitter {
     if (this.disposed) throw new NetworkDormantError("GATE_REVOKED");
     const present = this.live.get(account.id);
     const loadsHome =
-      opts.navigate !== false && (!present || present.webContents.isDestroyed() || !present.navigated);
+      opts.navigate !== false && !this.restorations.has(account.id) &&
+      (!present || present.webContents.isDestroyed() || !present.navigated);
     assertBusinessNetwork(account.id, loadsHome ? getPlatform(account.platformId).routes.home : undefined);
     let entry = this.live.get(account.id);
     if (entry?.crashed) throw new Error("页面已退出，请点击重新加载");
@@ -317,7 +362,7 @@ export class ViewPool extends EventEmitter {
       this.live.set(account.id, entry);
     }
     entry.lastUsedAt = Date.now();
-    if (opts.navigate !== false && !entry.navigated) {
+    if (loadsHome && !entry.navigated) {
       entry.navigated = true;
       void this.load(entry, getPlatform(account.platformId).routes.home, false, true).catch(() => undefined);
     }
@@ -332,7 +377,8 @@ export class ViewPool extends EventEmitter {
       this.live.delete(account.id);
       await this.beginClose(previous);
     }
-    const entry = this.ensure(account, { navigate: !enterHomepage });
+    const restoration = this.restorations.get(account.id);
+    const entry = this.ensure(account, { navigate: !enterHomepage && !restoration });
     for (const other of this.live.values()) {
       if (other !== entry && other.visible) this.setVisible(other, false);
     }
@@ -343,7 +389,16 @@ export class ViewPool extends EventEmitter {
     this.applyBounds(entry, bounds);
     this.setVisible(entry, true);
     entry.lastUsedAt = Date.now();
-    if (enterHomepage && !entry.navigated) {
+    if (restoration) {
+      if (restoration.requiresAction) {
+        entry.lastError = restoration.message;
+      } else {
+        this.restorations.delete(account.id);
+        entry.lastForeground = restoration;
+        entry.navigated = true;
+        void this.load(entry, restoration.url).catch(() => undefined);
+      }
+    } else if (enterHomepage && !entry.navigated) {
       // Claim the foreground before loading so collectors cannot treat this
       // entry as a hidden page and redirect it into the creator console.
       // Re-entering an existing account only restores its live page, including
@@ -389,13 +444,16 @@ export class ViewPool extends EventEmitter {
     assertBusinessNetwork(accountId, url);
     const entry = this.live.get(accountId);
     if (!entry) throw new Error("view-not-live");
-    if (options.background && entry.messageMode) return;
+    if (options.background && (entry.messageMode || this.restorations.has(accountId))) return;
+    if (!options.background) this.restorations.delete(accountId);
     this.abandonHomepageCheck(accountId);
     entry.navigated = true;
     await this.load(entry, url, false, options.background);
   }
 
   reload(accountId: string): void {
+    if (this.restorations.get(accountId)?.requiresAction)
+      throw new Error(this.restorations.get(accountId)!.message!);
     this.abandonHomepageCheck(accountId);
     const entry = this.live.get(accountId);
     if (entry?.crashed) {
@@ -448,6 +506,8 @@ export class ViewPool extends EventEmitter {
 
   /** Destroy the view (partition data is retained). */
   remove(accountId: string): void {
+    this.restorations.delete(accountId);
+    this.confirmedHomepages.delete(accountId);
     const entry = this.live.get(accountId);
     if (!entry) return;
     this.live.delete(accountId);
@@ -461,6 +521,10 @@ export class ViewPool extends EventEmitter {
     if (!entries.length) return Promise.resolve();
     const live = this.live.get(accountId);
     const state = live ? this.toState(live) : null;
+    if (live && !this.restorations.has(accountId)) {
+      const restoration = live.visible || live.messageMode ? this.restorationFor(live) : live.lastForeground;
+      if (restoration) this.restorations.set(accountId, restoration);
+    }
     this.live.delete(accountId);
     const closing = entries.map((entry) => this.beginClose(entry));
     if (state)
@@ -471,7 +535,9 @@ export class ViewPool extends EventEmitter {
         loading: false,
         canGoBack: false,
         canGoForward: false,
-        lastError: "等待国内网络",
+        lastError: this.restorations.get(accountId)?.message ?? "等待国内网络",
+        recoveryRequired: this.restorations.get(accountId)?.requiresAction ?? false,
+        recoveryMessage: this.restorations.get(accountId)?.message ?? undefined,
         lifecycle: "sleeping",
         revision: ++this.revision,
       } satisfies ViewState);
@@ -479,6 +545,18 @@ export class ViewPool extends EventEmitter {
       if (results.some((result) => result.status === "rejected"))
         throw new Error("ACCOUNT_VIEWS_CLOSE_FAILED");
     });
+  }
+
+  /** Explicit reconnect may retry a failed native close; ordinary revocation remains sticky. */
+  async retryNetworkAccountClose(accountId: string): Promise<void> {
+    const failed = [...(this.owned.get(accountId) ?? [])].filter((entry) => entry.closeFailed);
+    if (!failed.length) return;
+    for (const entry of failed) {
+      entry.closePromise = null;
+      entry.closeFailed = false;
+    }
+    const results = await Promise.allSettled(failed.map((entry) => this.beginClose(entry)));
+    if (results.some((result) => result.status === "rejected")) throw new Error("ACCOUNT_VIEWS_CLOSE_FAILED");
   }
 
   async flushAll(): Promise<void> {
@@ -489,6 +567,9 @@ export class ViewPool extends EventEmitter {
 
   dispose(): void {
     this.disposed = true;
+    this.restorations.clear();
+    this.backgroundActivities.clear();
+    this.confirmedHomepages.clear();
     if (this.homepageEvictionTimer) clearTimeout(this.homepageEvictionTimer);
     const closing = [...this.owned.values()].flatMap((entries) => [...entries].map((entry) => this.beginClose(entry)));
     this.live.clear();
@@ -544,6 +625,10 @@ export class ViewPool extends EventEmitter {
       navigated: false,
       resourcesReleased: false,
       closePromise: null,
+      closeFailed: false,
+      backgroundThrottled: false,
+      lastForeground: null,
+      pendingUrl: null,
     };
     const owned = this.owned.get(account.id) ?? new Set<LiveView>();
     owned.add(entry);
@@ -580,6 +665,7 @@ export class ViewPool extends EventEmitter {
     const emit = () => this.emitState(entry);
     wc.on("did-start-navigation", (_event, _url, _inPlace, mainFrame) => {
       if (mainFrame) {
+        entry.pendingUrl = _url;
         entry.pageVersion++;
         const temporary = this.homepageCheckEntries.get(entry.account.id);
         if (temporary?.entry === entry && temporary.navigationVersion === entry.navigationVersion)
@@ -588,6 +674,7 @@ export class ViewPool extends EventEmitter {
     });
     wc.on("did-start-loading", emit);
     wc.on("did-stop-loading", () => {
+      entry.pendingUrl = null;
       emit();
       this.reportActivity(entry, "loaded");
     });
@@ -628,6 +715,7 @@ export class ViewPool extends EventEmitter {
     const wc = entry.webContents;
     if (wc.isDestroyed()) return;
     const navigationVersion = ++entry.navigationVersion;
+    entry.pendingUrl = url;
     let pageVersion = entry.pageVersion;
     const operation = beginBusinessOperation(entry.account.id, url);
     try {
@@ -681,6 +769,7 @@ export class ViewPool extends EventEmitter {
           await this.load(entry, url, true, background);
       }
     } finally {
+      if (navigationVersion === entry.navigationVersion) entry.pendingUrl = null;
       operation.release();
     }
   }
@@ -693,13 +782,48 @@ export class ViewPool extends EventEmitter {
 
   private setVisible(entry: LiveView, visible: boolean): void {
     if (entry.visible === visible) return;
+    if (!visible && !this.restorations.has(entry.account.id)) entry.lastForeground = this.restorationFor(entry);
     entry.visible = visible;
     entry.homepageRetainUntil = !visible && isHomepageContext(entry.account.platformId, entry.webContents.getURL())
       ? Date.now() + HOMEPAGE_SWITCH_GRACE_MS : 0;
     entry.view.setVisible(visible);
     if (visible && entry.bounds) entry.view.setBounds(entry.bounds);
     if (!visible) entry.view.setBounds(MIN_BOUNDS);
+    this.updateBackgroundThrottling(entry);
     this.scheduleHomepageEviction();
+  }
+
+  private restorationFor(entry: LiveView): ViewRestoration {
+    const platform = getPlatform(entry.account.platformId);
+    const current = entry.pendingUrl ?? (entry.webContents.isDestroyed() ? "" : entry.webContents.getURL());
+    if ((!current || current === "about:blank") && entry.lastForeground) return { ...entry.lastForeground };
+    const homepage = isHomepageContext(entry.account.platformId, current);
+    const login = isLoginUrl(entry.account.platformId, current) || isVerificationUrl(entry.account.platformId, current) ||
+      homepage && !this.confirmedHomepages.has(entry.account.id);
+    const safe = !entry.messageMode && !login &&
+      (isReadonlyPublicPage(entry.account.platformId, current) || isReadonlyManagementPage(entry.account.platformId, current));
+    if (safe) return { url: current, requiresAction: false, message: null };
+    const reason = entry.messageMode ? "消息页面" : login ? "扫码或验证页面" : "编辑页面或未确认的页面";
+    return {
+      url: platform.routes.site ?? platform.routes.home,
+      requiresAction: true,
+      message: `网络中断已关闭${reason}。请通过主页、管理或消息入口重新打开，并核对未保存内容；不会自动提交或继续扫码。`,
+    };
+  }
+
+  private updateBackgroundThrottling(entry: LiveView): void {
+    const wc = entry.webContents;
+    if (wc.isDestroyed() || entry.closePromise) return;
+    // Public homepages may contain a QR dialog without changing their URL.
+    // Throttle only known read-only management pages; tasks, editors and message pages stay active.
+    const throttle = !entry.visible && !entry.messageMode && !entry.checkHostAttached && !wc.isLoading() &&
+      !this.backgroundActivities.has(entry.account.id) &&
+      isReadonlyManagementPage(entry.account.platformId, wc.getURL());
+    if (throttle === entry.backgroundThrottled) return;
+    try {
+      wc.setBackgroundThrottling(throttle);
+      entry.backgroundThrottled = throttle;
+    } catch { /* Resource tuning must not fail account work if Chromium is exiting. */ }
   }
 
   private evictIfNeeded(incomingId: string | null): void {
@@ -709,6 +833,8 @@ export class ViewPool extends EventEmitter {
         .filter((entry) => !entry.visible)
         .filter((entry) => !entry.messageMode)
         .filter((entry) => !this.isOnLoginPage(entry))
+        .filter((entry) => !isEditingPage(entry.webContents.getURL()))
+        .filter((entry) => !this.backgroundActivities.has(entry.account.id))
         .filter((entry) => entry.homepageRetainUntil <= Date.now())
         .sort((a, b) => a.lastUsedAt - b.lastUsedAt);
       const victim = candidates[0];
@@ -781,9 +907,10 @@ export class ViewPool extends EventEmitter {
           this.releaseDestroyed(entry);
           resolve();
         },
-        () => reject(new Error("ACCOUNT_VIEW_CLOSE_FAILED")),
+        () => { entry.closeFailed = true; reject(new Error("ACCOUNT_VIEW_CLOSE_FAILED")); },
       );
     } catch {
+      entry.closeFailed = true;
       reject(new Error("ACCOUNT_VIEW_CLOSE_FAILED"));
     }
     return entry.closePromise;
@@ -879,11 +1006,14 @@ export class ViewPool extends EventEmitter {
       isLoginPage: Boolean(url) && isLoginUrl(entry.account.platformId, url),
       isVerificationPage: Boolean(url) && isVerificationUrl(entry.account.platformId, url),
       lastError: entry.lastError,
+      recoveryRequired: this.restorations.get(entry.account.id)?.requiresAction ?? false,
+      recoveryMessage: this.restorations.get(entry.account.id)?.message ?? undefined,
     };
   }
 
   private emitState(entry: LiveView): void {
     if (this.live.get(entry.account.id) !== entry) return;
+    this.updateBackgroundThrottling(entry);
     this.emit("state", this.toState(entry));
   }
 
@@ -896,6 +1026,35 @@ export class ViewPool extends EventEmitter {
       loading: false,
     });
   }
+}
+
+function isEditingPage(url: string): boolean {
+  return /(?:upload|publish|(?:^|[/_?#&-])edit(?:or)?(?:[/?#&=_-]|$)|\/post\/create)/i.test(url);
+}
+
+function isReadonlyPublicPage(platformId: PlatformId, url: string): boolean {
+  if (!isHomepageContext(platformId, url) || isEditingPage(url)) return false;
+  const page = new URL(url);
+  const entry = new URL(getPlatform(platformId).routes.site!);
+  // Restore known browsing routes only. In particular, never replay logout/settings/action URLs.
+  if (page.hash || /(?:logout|signout|passport|callback|redirect|action)=/i.test(page.search)) return false;
+  if (page.pathname.replace(/\/$/, "") === entry.pathname.replace(/\/$/, "")) return true;
+  return /^(?:\/video\/[\w-]+|\/short-video\/[\w-]+|\/profile\/[\w-]+|\/user\/profile\/[\w-]+|\/discovery\/item\/[\w-]+)\/?$/.test(page.pathname);
+}
+
+function isReadonlyManagementPage(platformId: PlatformId, url: string): boolean {
+  if (isEditingPage(url) || isLoginUrl(platformId, url) || isVerificationUrl(platformId, url)) return false;
+  try {
+    const page = new URL(url);
+    if (page.protocol !== "https:" || page.username || page.password || page.port) return false;
+    const routes = getPlatform(platformId).routes;
+    return [routes.home, routes.works, routes.analytics].some((target) => {
+      if (!target) return false;
+      const known = new URL(target);
+      return page.origin === known.origin && page.pathname.replace(/\/$/, "") === known.pathname.replace(/\/$/, "") &&
+        page.hash === known.hash;
+    });
+  } catch { return false; }
 }
 
 function clampBounds(bounds: ViewBounds, window: BaseWindow): ViewBounds {

@@ -416,9 +416,9 @@ describe("CollectScheduler network queue", () => {
   it("requests a fresh Channels page observation for keepalive without collecting data", async () => {
     allowed = true;
     const s = setup("weixin_channels");
-    scheduler.enqueue(s.account.id, "keepalive");
+    const job = scheduler.enqueue(s.account.id, "keepalive");
     await vi.advanceTimersByTimeAsync(1000);
-    expect(s.checkStatus).toHaveBeenCalledExactlyOnceWith(s.account.id, { force: true, refreshPage: true });
+    expect(s.checkStatus).toHaveBeenCalledExactlyOnceWith(s.account.id, { force: true, refreshPage: true, keepaliveJobId: job.id });
     expect(s.collect).not.toHaveBeenCalled();
   });
 
@@ -446,7 +446,7 @@ describe("CollectScheduler network queue", () => {
     scheduler.applySettings({ ...store.settings.get(), collectEnabled: false, keepaliveEnabled: true });
     scheduler.start();
     await vi.advanceTimersByTimeAsync(120_000);
-    expect(s.checkStatus).toHaveBeenCalledExactlyOnceWith(s.account.id, { force: true, refreshPage: true });
+    expect(s.checkStatus).toHaveBeenCalledExactlyOnceWith(s.account.id, { force: true, refreshPage: true, keepaliveJobId: job.id });
     expect(store.collectJobs.get(job.id)?.state).toBe("done");
     expect(store.metrics.lastKeepaliveRun(s.account.id)?.status).toBe("success");
     expect(s.collect).toHaveBeenCalledOnce();

@@ -40,6 +40,15 @@ export interface ProfileInfo {
   externalId?: string | null;
 }
 
+export interface AccountCheckOptions {
+  skipProbe?: boolean;
+  silent?: boolean;
+  force?: boolean;
+  refreshPage?: boolean;
+  /** Main-process scheduler ownership; only this running keepalive may yield its own page. */
+  keepaliveJobId?: string;
+}
+
 export interface AccountServiceOptions {
   store: Store;
   viewPool: ViewPool;
@@ -61,6 +70,7 @@ const PATROL_INTERVAL_MS = 5 * 60_000;
 const PATROL_STAGGER_MS = 700;
 const RECOVERY_DELAY_MS = 5_000;
 const RECOVERY_RETRY_MS = 60_000;
+const HOMEPAGE_NEGATIVE_STABLE_MS = 3_000;
 const ATTENTION_STATES: ReadonlySet<AccountStatus> = new Set(["offline", "needs_verification", "expiring"]);
 
 export class AccountService extends EventEmitter {
@@ -68,11 +78,16 @@ export class AccountService extends EventEmitter {
   private readonly inFlight = new Set<string>();
   private readonly flights = new Map<string, Promise<Account>>();
   private readonly pageRefreshFlights = new Set<string>();
+  private readonly keepaliveCheckFlights = new Map<string, string>();
   private activeChecks = 0;
   private readonly checkWaiters: Array<() => void> = [];
   private readonly lastAttemptAt = new Map<string, number>();
   private readonly negativeEvidence = new Map<string, { key: string; at: number }>();
   private readonly consumedEvidence = new Map<string, string>();
+  private readonly identityAuditKeys = new Map<string, string>();
+  private readonly creatorEvidenceKeys = new Map<string, string>();
+  private readonly creatorNegativeEvidence = new Map<string, { key: string; at: number }>();
+  private readonly creatorLoginTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly activityDuringCheck = new Set<string>();
   private readonly pageActivitySequence = new Map<string, number>();
   private attemptSequence = 0;
@@ -182,6 +197,76 @@ export class AccountService extends EventEmitter {
     this.syncProfile(accountId, evidence.profile);
   }
 
+  /** Creator evidence is independent from the consumer homepage's login conclusion. */
+  private observeCreatorIdentity(accountId: string): void {
+    if (this.disposed || this.sessionChanges.has(accountId) || !canUseBusinessNetwork(accountId)) return;
+    const account = this.options.store.accounts.get(accountId);
+    const page = this.options.viewPool.getState(accountId);
+    const evidence = this.options.viewPool.getIdentityEvidence?.(accountId);
+    const now = Date.now();
+    if (!account || !evidence || !Number.isFinite(evidence.observedAt) ||
+        evidence.observedAt > now || now - evidence.observedAt >= 30_000) return;
+    if (this.identityAuditKeys.get(accountId) !== evidence.key) {
+      this.identityAuditKeys.set(accountId, evidence.key);
+      this.options.store.audit.append({ action: "session.identity", accountId, details: {
+        kind: evidence.kind, reason: evidence.reason, observedAt: evidence.observedAt,
+        ...(evidence.endpoint ? { endpoint: evidence.endpoint } : {}),
+        ...(evidence.httpStatus !== undefined ? { httpStatus: evidence.httpStatus } : {}),
+        ...(evidence.platformCode !== undefined ? { platformCode: evidence.platformCode } : {}),
+      } });
+    }
+    if (!page || page.loading || page.lastError || !isProfilePage(account.platformId, page) ||
+        isHomepageContext(account.platformId, page.url) ||
+        this.creatorEvidenceKeys.get(accountId) === evidence.key) return;
+    // isProfilePage also permits Bilibili's consumer API context; creator authority
+    // is narrower and must come from the creator console itself.
+    try { if (new URL(page.url).hostname !== consoleHost(account.platformId)) return; } catch { return; }
+    this.creatorEvidenceKeys.set(accountId, evidence.key);
+    if (evidence.kind === "unconfirmed") return;
+    if (evidence.kind === "online") this.creatorNegativeEvidence.delete(accountId);
+    else {
+      const prior = this.creatorNegativeEvidence.get(accountId);
+      this.creatorNegativeEvidence.set(accountId, { key: evidence.key, at: now });
+      if (!prior || prior.key === evidence.key || now - prior.at > 60_000) return;
+    }
+    this.cancelCreatorLoginConfirmation(accountId);
+    this.rememberCreatorConfirmation(accountId, evidence.kind, evidence.observedAt);
+  }
+
+  private rememberCreatorConfirmation(accountId: string, kind: "online" | "offline", observedAt = Date.now()): void {
+    const updated = this.options.store.accounts.updateCreatorConfirmation(accountId, { kind, observedAt });
+    if (updated) this.emit("account-changed", updated);
+  }
+
+  private cancelCreatorLoginConfirmation(accountId: string): void {
+    const timer = this.creatorLoginTimers.get(accountId);
+    if (timer) clearTimeout(timer);
+    this.creatorLoginTimers.delete(accountId);
+  }
+
+  /** A settled login page needs a second local observation, never an automatic QR reload. */
+  private scheduleCreatorLoginConfirmation(accountId: string): void {
+    this.cancelCreatorLoginConfirmation(accountId);
+    const account = this.options.store.accounts.get(accountId);
+    const page = this.options.viewPool.getState(accountId);
+    if (!account || !isSettledCreatorLoginPage(account.platformId, page) ||
+        this.disposed || this.sessionChanges.has(accountId) || !canUseBusinessNetwork(accountId)) return;
+    const epoch = this.accountEpoch.get(accountId) ?? 0;
+    const activity = this.pageActivitySequence.get(accountId) ?? 0;
+    const timer = setTimeout(() => {
+      this.creatorLoginTimers.delete(accountId);
+      const current = this.options.viewPool.getState(accountId);
+      if (this.disposed || this.sessionChanges.has(accountId) || !canUseBusinessNetwork(accountId) ||
+          epoch !== (this.accountEpoch.get(accountId) ?? 0) || activity !== (this.pageActivitySequence.get(accountId) ?? 0) ||
+          !isSettledCreatorLoginPage(account.platformId, current) || current?.url !== page?.url ||
+          current?.instanceId !== page?.instanceId || current?.navigationId !== page?.navigationId) return;
+      this.creatorNegativeEvidence.delete(accountId);
+      this.rememberCreatorConfirmation(accountId, "offline");
+    }, HOMEPAGE_NEGATIVE_STABLE_MS);
+    timer.unref?.();
+    this.creatorLoginTimers.set(accountId, timer);
+  }
+
   reorder(ids: string[]): void {
     this.options.store.accounts.reorder(ids);
     this.emit("accounts-reloaded");
@@ -223,6 +308,7 @@ export class AccountService extends EventEmitter {
   async prepareSessionChange(accountId: string, kind: "delete" | "reset" | "restore"): Promise<void> {
     this.sessionChanges.add(accountId);
     this.invalidateHomepageConfirmation(accountId, "登录环境已变化，等待主页重新确认");
+    this.options.store.accounts.updateCreatorConfirmation(accountId, null);
     this.suspendNetworkAccount(accountId);
     await this.options.onSessionChange?.(accountId, kind);
   }
@@ -249,11 +335,13 @@ export class AccountService extends EventEmitter {
     const entryUrl = platformEntryUrl(account.platformId);
     const restoreCurrent = Boolean(businessPageOrigin(currentUrl) &&
       currentPage?.lifecycle !== "crashed" && currentPage?.lifecycle !== "destroyed");
-    const targetUrl = restoreCurrent ? currentUrl! : enterHomepage ? entryUrl : getPlatform(account.platformId).routes.home;
+    const restoration = this.options.viewPool.getRestoration?.(id);
+    const targetUrl = restoration?.url ?? (restoreCurrent ? currentUrl! : enterHomepage ? entryUrl : getPlatform(account.platformId).routes.home);
+    const navigate = enterHomepage || restoreCurrent || Boolean(restoration);
     this.prepareNetworkOperation(
       id,
-      enterHomepage || restoreCurrent ? "view-navigate" : "view-home",
-      enterHomepage || restoreCurrent ? targetUrl : undefined,
+      navigate ? "view-navigate" : "view-home",
+      navigate ? targetUrl : undefined,
     );
     assertBusinessNetwork(id, targetUrl);
     const state = await this.options.viewPool.show(
@@ -317,13 +405,18 @@ export class AccountService extends EventEmitter {
   onActivity(accountId: string, reason: "navigated" | "cookies" | "loaded" | "identity"): void {
     const account = this.options.store.accounts.get(accountId);
     if (!account) return;
-    if (reason === "identity" || reason === "loaded") this.syncObservedProfile(accountId);
+    if (reason === "navigated" || reason === "cookies") this.creatorNegativeEvidence.delete(accountId);
+    if (reason === "identity" || reason === "loaded") {
+      this.observeCreatorIdentity(accountId);
+      this.syncObservedProfile(accountId);
+    }
     // Creator identity responses do not describe a consumer homepage session.
     if (reason === "identity" && requiresHomepageLogin(account.platformId)) return;
     // Platforms rotate cookies and navigate during ordinary use. These events
     // request a recheck; they are not evidence that the user has logged out.
     if (reason !== "identity")
       this.pageActivitySequence.set(accountId, (this.pageActivitySequence.get(accountId) ?? 0) + 1);
+    this.scheduleCreatorLoginConfirmation(accountId);
     this.lastAttemptAt.delete(accountId);
     if (this.flights.has(accountId)) {
       this.activityDuringCheck.add(accountId);
@@ -357,10 +450,14 @@ export class AccountService extends EventEmitter {
     if (account && (requiresHomepageLogin(account.platformId) || account.platformId === "weixin_channels" && account.lastOnlineAt))
       this.recoveryPending.add(accountId);
     this.cancelCheck(accountId);
+    this.cancelCreatorLoginConfirmation(accountId);
     this.lastProbeAt.delete(accountId);
     this.lastAttemptAt.delete(accountId);
     this.negativeEvidence.delete(accountId);
     this.consumedEvidence.delete(accountId);
+    this.identityAuditKeys.delete(accountId);
+    this.creatorEvidenceKeys.delete(accountId);
+    this.creatorNegativeEvidence.delete(accountId);
     this.profileEvidenceKeys.delete(accountId);
     this.profileVersions.set(accountId, this.profileVersion(accountId) + 1);
     this.pageActivitySequence.delete(accountId);
@@ -386,15 +483,17 @@ export class AccountService extends EventEmitter {
 
   checkStatus(
     accountId: string,
-    opts: { skipProbe?: boolean; silent?: boolean; force?: boolean; refreshPage?: boolean } = {},
+    opts: AccountCheckOptions = {},
   ): Promise<Account> {
     const running = this.flights.get(accountId);
     if (running) {
-      if (opts.refreshPage && !this.pageRefreshFlights.has(accountId))
+      if ((opts.refreshPage && !this.pageRefreshFlights.has(accountId)) ||
+          (opts.keepaliveJobId && this.keepaliveCheckFlights.get(accountId) !== opts.keepaliveJobId))
         return running.then(() => this.checkStatus(accountId, opts));
       return running;
     }
     if (opts.refreshPage) this.pageRefreshFlights.add(accountId);
+    if (opts.keepaliveJobId) this.keepaliveCheckFlights.set(accountId, opts.keepaliveJobId);
     const execute = async () => {
       if (this.activeChecks >= 2) await new Promise<void>((resolve) => this.checkWaiters.push(resolve));
       else this.activeChecks++;
@@ -408,6 +507,7 @@ export class AccountService extends EventEmitter {
     };
     const task = execute().finally(() => {
       this.pageRefreshFlights.delete(accountId);
+      this.keepaliveCheckFlights.delete(accountId);
       if (this.flights.get(accountId) === task) this.flights.delete(accountId);
       if (this.activityDuringCheck.delete(accountId)) {
         this.lastAttemptAt.delete(accountId);
@@ -444,6 +544,7 @@ export class AccountService extends EventEmitter {
   }
 
   private rememberHomepageConfirmation(accountId: string, kind: "online" | "offline"): void {
+    this.options.viewPool.setHomepageLoginConfirmed?.(accountId, kind === "online");
     const confirmation = { kind, observedAt: Date.now() };
     this.homepageConfirmations.set(accountId, confirmation);
     this.options.store.accounts.updateCheckInfo(accountId, {
@@ -468,7 +569,7 @@ export class AccountService extends EventEmitter {
     else this.prepareNetworkOperation(accountId, "check-status");
   }
 
-  private shouldRecheckHomepage(account: Account): boolean {
+  private shouldRecheckHomepage(account: Account, keepaliveJobId?: string): boolean {
     if (!requiresHomepageLogin(account.platformId)) return false;
     const now = Date.now();
     const confirmation = this.homepageConfirmations.get(account.id);
@@ -478,21 +579,22 @@ export class AccountService extends EventEmitter {
     if (last !== undefined && now >= last && now - last < HOMEPAGE_RECHECK_INTERVAL_MS) return false;
     // Never move a collector's page while it is obtaining data. Queued jobs
     // also get priority, so startup does not bounce between home and management.
-    if (this.options.store.collectJobs.list(account.id, true).some(job => !job.paused &&
+    if (this.options.store.collectJobs.list(account.id, true).some(job =>
+        !(job.id === keepaliveJobId && job.trigger === "keepalive" && job.state === "running") && !job.paused &&
         (job.state === "running" || job.state === "queued" && (job.notBefore ?? 0) <= now))) return false;
     return this.options.viewPool.canCheckHomepage?.(account.id, account.platformId) ?? false;
   }
 
   private async performCheck(
     accountId: string,
-    opts: { skipProbe?: boolean; silent?: boolean; force?: boolean; refreshPage?: boolean } = {},
+    opts: AccountCheckOptions = {},
   ): Promise<Account> {
     const account = this.options.store.accounts.get(accountId);
     if (!account) throw new Error("账号不存在");
     if (this.disposed || this.sessionChanges.has(accountId)) return account;
     if (this.inFlight.has(accountId)) return account;
     const initialPage = this.options.viewPool.getState(accountId);
-    const recheckHomepage = this.shouldRecheckHomepage(account);
+    const recheckHomepage = this.shouldRecheckHomepage(account, opts.keepaliveJobId);
     // Never replace an active editor, QR login or verification page in the background.
     const refreshPage = opts.refreshPage && account.platformId === "weixin_channels" &&
       canRefreshChannelsPage(initialPage);
@@ -519,7 +621,7 @@ export class AccountService extends EventEmitter {
     try {
       this.lastAttemptAt.set(accountId, Date.now());
       this.recordCheck(accountId, "checking", "正在核实平台登录状态");
-      if (recheckHomepage && this.shouldRecheckHomepage(account)) {
+      if (recheckHomepage && this.shouldRecheckHomepage(account, opts.keepaliveJobId)) {
         this.homepageRecheckAt.set(accountId, Date.now());
         await this.options.viewPool.recheckHomepage({ id: account.id, platformId: account.platformId });
         operation.assertCurrent();
@@ -543,6 +645,8 @@ export class AccountService extends EventEmitter {
       const homepageContext = isHomepageContext(account.platformId, viewState?.url ?? "");
       const homepageRequired = requiresHomepageLogin(account.platformId);
       const startingEvidence = this.options.viewPool.getIdentityEvidence?.(accountId);
+      this.observeCreatorIdentity(accountId);
+      if (!this.creatorLoginTimers.has(accountId)) this.scheduleCreatorLoginConfirmation(accountId);
       const pooled = this.options.viewPool.getSession(accountId)?.session;
       const ses = pooled ?? configureAccountSession(account.id, account.platformId).session;
       // Debounce creator API checks, but always read a homepage's own identity
@@ -743,22 +847,36 @@ export class AccountService extends EventEmitter {
       // SPA hydration often finishes shortly after did-stop-loading. A bounded
       // local DOM retry avoids leaving a successful login unknown for a patrol
       // interval; it never reloads the page or requests another QR code.
-      const deadline = Date.now() + 2000;
+      const hydrationDeadline = Date.now() + 2000;
+      let negative: { at: number; activitySequence: number } | undefined;
+      let negativeDeadline: number | undefined;
       while (true) {
         const current = this.options.viewPool.getState(accountId);
         if (wc.isDestroyed() || current?.instanceId !== viewState.instanceId ||
-            current?.navigationId !== viewState.navigationId || current?.url !== viewState.url || current?.loading)
+            current?.navigationId !== viewState.navigationId || current?.url !== viewState.url || current?.loading || current?.lastError)
           return observation(pending);
         const activitySequence = this.pageActivitySequence.get(accountId) ?? 0;
         const result = await evaluateWithLease<HomepageLoginVerdict>(
           wc, buildHomepageLoginScript(platformId), operation, 3000,
         );
         operation.assertCurrent();
-        if (activitySequence === (this.pageActivitySequence.get(accountId) ?? 0) &&
-            result?.source === "homepage" && ["online", "offline"].includes(result.kind) && typeof result.reason === "string")
-          return observation(result, activitySequence);
-        if (!waitForHydration || Date.now() >= deadline) return observation(pending);
-        await wait(250, undefined, { signal: operation.signal });
+        const unchanged = activitySequence === (this.pageActivitySequence.get(accountId) ?? 0);
+        if (unchanged && result?.source === "homepage" && typeof result.reason === "string") {
+          if (result.kind === "online") return observation(result, activitySequence);
+          if (result.kind === "offline") {
+            // The document can be complete while an SPA still renders its guest
+            // controls. Keep this same view alive and require stable negative UI.
+            negativeDeadline ??= Date.now() + 2 * HOMEPAGE_NEGATIVE_STABLE_MS;
+            if (!negative || negative.activitySequence !== activitySequence)
+              negative = { at: Date.now(), activitySequence };
+            else if (Date.now() - negative.at >= HOMEPAGE_NEGATIVE_STABLE_MS)
+              return observation(result, activitySequence);
+          } else negative = undefined;
+        } else negative = undefined;
+        if ((!waitForHydration && negativeDeadline === undefined) || Date.now() >= (negativeDeadline ?? hydrationDeadline))
+          return observation(pending);
+        if (negativeDeadline === undefined) await wait(250, undefined, { signal: operation.signal });
+        else await waitForHomepagePoll(operation.signal);
       }
     } catch (error) {
       operation.assertCurrent();
@@ -967,7 +1085,22 @@ export class AccountService extends EventEmitter {
     this.recoveryPending.clear();
     this.homepageRecheckAt.clear();
     this.homepageConfirmations.clear();
+    for (const timer of this.creatorLoginTimers.values()) clearTimeout(timer);
+    this.creatorLoginTimers.clear();
+    this.creatorNegativeEvidence.clear();
+    this.identityAuditKeys.clear();
+    this.creatorEvidenceKeys.clear();
   }
+}
+
+/** Abortable DOM retry uses the application timer so shutdown and tests can drain it. */
+function waitForHomepagePoll(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason); return; }
+    const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 250);
+    const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(signal.reason); };
+    signal.addEventListener("abort", abort, { once: true });
+  });
 }
 
 /** Only read-only management routes may be revisited in a hidden Channels view. */
@@ -982,6 +1115,19 @@ function canRefreshChannelsPage(page: ViewState | null): boolean {
       url.origin === new URL(routes.home).origin &&
       [routes.home, routes.works, routes.analytics, routes.comments]
         .some((route) => route && new URL(route).pathname === url.pathname.replace(/\/$/, ""));
+  } catch { return false; }
+}
+
+function isSettledCreatorLoginPage(platformId: PlatformId, page: ViewState | null): boolean {
+  if (!page?.url || page.loading || page.lastError || isHomepageContext(platformId, page.url) ||
+      isVerificationUrl(platformId, page.url)) return false;
+  try {
+    const url = new URL(page.url);
+    const login = new URL(getPlatform(platformId).routes.login);
+    return url.protocol === "https:" && !url.username && !url.password && !url.port &&
+      (url.hostname === consoleHost(platformId) || url.hostname === login.hostname) &&
+      (isLoginUrl(platformId, url.origin + url.pathname) ||
+        url.origin + url.pathname.replace(/\/$/, "") === login.origin + login.pathname.replace(/\/$/, ""));
   } catch { return false; }
 }
 

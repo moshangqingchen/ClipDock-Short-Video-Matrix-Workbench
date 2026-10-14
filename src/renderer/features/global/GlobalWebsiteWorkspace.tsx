@@ -26,6 +26,7 @@ import { api, hasBridge } from "@renderer/lib/api";
 import { useToasts, useUi } from "@renderer/store";
 import { isGlobalProxyEnabled, useNetwork } from "@renderer/store/network";
 import { WorkspaceActions } from "@renderer/components/ui/WorkspaceActions";
+import { PublishAssist } from "@renderer/features/publish/PublishAssist";
 import styles from "./global-website-workspace.module.css";
 
 interface Props {
@@ -74,6 +75,7 @@ function MountedGlobalWebsiteWorkspace({ account, onConfigureApi }: Props) {
   const definition = GLOBAL_PLATFORM_DEFINITIONS[account.platformId];
   const [menu, setMenu] = useState<DOMRect | null>(null);
   const sidebarHidden = useUi((s) => s.sidebarHidden);
+  const showPublish = useUi((s) => s.drawerOpen && s.drawerTab === "publish");
   const [state, setState] = useState<GlobalWebState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<GlobalWebErrorCode | null>(null);
@@ -298,6 +300,10 @@ function MountedGlobalWebsiteWorkspace({ account, onConfigureApi }: Props) {
           >
             发布
           </Button>
+          <Button size="sm" variant="secondary" onClick={() => {
+            useUi.getState().setDrawerTab("publish");
+            useUi.getState().toggleDrawer(!showPublish);
+          }}>{showPublish ? "收起文案" : "文案与素材"}</Button>
         </nav>
       </header>
       {error && open ? (
@@ -340,6 +346,7 @@ function MountedGlobalWebsiteWorkspace({ account, onConfigureApi }: Props) {
             </div>
           ) : null}
         </div>
+        {showPublish ? <aside className={styles.publishAside} aria-label="发布助手侧栏"><PublishAssist scope="global" accountId={account.id} /></aside> : null}
       </div>
     </section>
   );

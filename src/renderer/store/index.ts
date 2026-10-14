@@ -123,6 +123,8 @@ interface UiState {
   railCollapsed: boolean;
   sidebarHidden: boolean;
   drawerOpen: boolean;
+  drawerTab: "data" | "publish";
+  setDrawerTab(tab: "data" | "publish"): void;
   /** Any overlay that must hide the native account view (modals, menus). */
   selectedAssetIds: string[];
   selectAssets(ids: string[]): void;
@@ -136,6 +138,7 @@ interface UiState {
   openAccount(id: string): void;
   openWork(id: string, url: string): void;
   setMetricsPlatform(id: PlatformId | null): void;
+  openPlatformMetrics(id: PlatformId): void;
   toggleRail(): void;
   toggleSidebar(): void;
   toggleDrawer(open?: boolean): void;
@@ -167,6 +170,8 @@ export const useUi = create<UiState>((set) => ({
   railCollapsed: false,
   sidebarHidden: false,
   drawerOpen: false,
+  drawerTab: "data",
+  setDrawerTab: (drawerTab) => set({ drawerTab }),
   selectedAssetIds: [],
   selectAssets: (ids) => set({ selectedAssetIds: ids }),
   overlayCount: 0,
@@ -199,6 +204,7 @@ export const useUi = create<UiState>((set) => ({
     route: "creator",
   })),
   setMetricsPlatform: (id) => set({ metricsPlatform: id }),
+  openPlatformMetrics: (id) => set({ metricsPlatform: id, metricsAccountId: null, creatorMode: "domestic", route: "metrics" }),
   toggleRail: () => set((s) => ({ railCollapsed: !s.railCollapsed })),
   toggleSidebar: () => set((s) => ({ sidebarHidden: !s.sidebarHidden })),
   toggleDrawer: (open) => set((s) => ({ drawerOpen: open ?? !s.drawerOpen })),

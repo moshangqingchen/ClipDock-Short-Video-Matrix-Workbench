@@ -24,6 +24,7 @@ vi.mock("electron", async () => {
     setAudioMuted = vi.fn((muted: boolean) => { this.muted = muted; });
     stop = vi.fn();
     setWebRTCIPHandlingPolicy = vi.fn();
+    setBackgroundThrottling = vi.fn();
     close = vi.fn();
     navDispose = vi.fn();
     isDestroyed = () => this.destroyed;
@@ -167,6 +168,120 @@ describe("ViewPool ownership through actual destruction", () => {
     await f.pool.finishHomepageCheck("one");
     expect(f.pool.has("one")).toBe(false);
     expect(wc.close).toHaveBeenCalledOnce();
+  });
+
+  it("restores a confirmed Kuaishou public page after revocation without opening its creator console", async () => {
+    const f = fixture();
+    const selected = { id: "ks", platformId: "kuaishou" as const };
+    const bounds = { x: 0, y: 0, width: 800, height: 600 };
+    await f.pool.show(selected, bounds, true);
+    await vi.advanceTimersByTimeAsync(0);
+    f.pool.setHomepageLoginConfirmed("ks", true);
+    const old = fixtures.contents.at(-1);
+    old.close.mockImplementation(() => old.destroy());
+    await f.pool.suspendNetworkAccount("ks");
+    expect(f.pool.getRestoration("ks")).toEqual({ url: getPlatform("kuaishou").routes.site, requiresAction: false, message: null });
+    // Matches ViewHost after network recovery: this account has already been entered.
+    await f.pool.show(selected, bounds, false);
+    await vi.advanceTimersByTimeAsync(0);
+    const restored = fixtures.contents.at(-1);
+    expect(restored.loadURL).toHaveBeenCalledExactlyOnceWith(getPlatform("kuaishou").routes.site);
+    expect(fixtures.sessions.at(-1).partition).toBe(fixtures.sessions[0].partition);
+  });
+
+  it.each(["qr", "editor", "messages", "homepage-qr"])("requires a deliberate entry after interruption of %s", async (kind) => {
+    const f = fixture();
+    const selected = { id: "ks", platformId: "kuaishou" as const };
+    const bounds = { x: 0, y: 0, width: 800, height: 600 };
+    await f.pool.show(selected, bounds, true);
+    await vi.advanceTimersByTimeAsync(0);
+    const old = fixtures.contents.at(-1);
+    old.url = kind === "qr" ? "https://passport.kuaishou.com/pc/account/login" :
+      kind === "editor" ? getPlatform("kuaishou").routes.upload : getPlatform("kuaishou").routes.site;
+    if (kind === "messages") f.pool.setMessageMode("ks", true);
+    old.close.mockImplementation(() => old.destroy());
+    await f.pool.suspendNetworkAccount("ks");
+    await f.pool.show(selected, bounds, false);
+    await vi.advanceTimersByTimeAsync(0);
+    const restored = fixtures.contents.at(-1);
+    expect(restored.loadURL).not.toHaveBeenCalled();
+    expect(f.pool.getState("ks")).toMatchObject({ recoveryRequired: true, recoveryMessage: expect.stringContaining("不会自动提交") });
+    expect(f.pool.canCheckHomepage("ks", "kuaishou")).toBe(false);
+    await f.pool.navigate("ks", getPlatform("kuaishou").routes.home, { background: true });
+    expect(restored.loadURL).not.toHaveBeenCalled();
+    expect(() => f.pool.reload("ks")).toThrow("网络中断");
+    await f.pool.navigate("ks", getPlatform("kuaishou").routes.site!);
+    expect(restored.loadURL).toHaveBeenCalledExactlyOnceWith(getPlatform("kuaishou").routes.site);
+    expect(f.pool.getRestoration("ks")).toBeNull();
+  });
+
+  it("remembers the last foreground page when a background collector subsequently changes its URL", async () => {
+    const f = fixture();
+    await f.pool.show(account("one"), { x: 0, y: 0, width: 800, height: 600 }, true);
+    await vi.advanceTimersByTimeAsync(0);
+    f.pool.setHomepageLoginConfirmed("one", true);
+    f.pool.hide("one");
+    await f.pool.navigate("one", getPlatform("bilibili").routes.home, { background: true });
+    const old = fixtures.contents.at(-1);
+    old.close.mockImplementation(() => old.destroy());
+    await f.pool.suspendNetworkAccount("one");
+    expect(f.pool.getRestoration("one")?.url).toBe(getPlatform("bilibili").routes.site);
+  });
+
+  it("does not replay a confirmed homepage's logout route or an editor whose navigation is still pending", async () => {
+    const f = fixture();
+    const selected = { id: "ks", platformId: "kuaishou" as const };
+    await f.pool.show(selected, { x: 0, y: 0, width: 800, height: 600 }, true);
+    await vi.advanceTimersByTimeAsync(0);
+    f.pool.setHomepageLoginConfirmed("ks", true);
+    const old = fixtures.contents.at(-1);
+    old.url = "https://www.kuaishou.com/logout";
+    old.close.mockImplementation(() => old.destroy());
+    await f.pool.suspendNetworkAccount("ks");
+    expect(f.pool.getRestoration("ks")).toMatchObject({ requiresAction: true, url: getPlatform("kuaishou").routes.site });
+    await f.pool.show(selected, { x: 0, y: 0, width: 800, height: 600 }, false);
+    const current = fixtures.contents.at(-1);
+    await f.pool.navigate("ks", getPlatform("kuaishou").routes.site!);
+    current.emit("did-start-navigation", {}, getPlatform("kuaishou").routes.upload, false, true);
+    current.close.mockImplementation(() => current.destroy());
+    await f.pool.suspendNetworkAccount("ks");
+    expect(f.pool.getRestoration("ks")?.requiresAction).toBe(true);
+  });
+
+  it("throttles only idle hidden management pages and keeps active tasks, messages and public QR pages running", async () => {
+    const f = fixture();
+    f.create("one");
+    const wc = fixtures.contents.at(-1);
+    await f.pool.navigate("one", getPlatform("bilibili").routes.home);
+    wc.emit("did-stop-loading");
+    expect(wc.setBackgroundThrottling).toHaveBeenLastCalledWith(true);
+    const release = f.pool.retainBackgroundActivity("one");
+    expect(wc.setBackgroundThrottling).toHaveBeenLastCalledWith(false);
+    release(); release();
+    expect(wc.setBackgroundThrottling).toHaveBeenLastCalledWith(true);
+    f.pool.setMessageMode("one", true);
+    expect(wc.setBackgroundThrottling).toHaveBeenLastCalledWith(false);
+    f.pool.setMessageMode("one", false);
+    await f.pool.navigate("one", getPlatform("bilibili").routes.site!);
+    wc.emit("did-stop-loading");
+    expect(wc.setBackgroundThrottling).toHaveBeenLastCalledWith(false);
+    await f.pool.navigate("one", getPlatform("bilibili").routes.upload);
+    wc.emit("did-stop-loading");
+    expect(wc.setBackgroundThrottling).toHaveBeenLastCalledWith(false);
+  });
+
+  it("explicitly retries a failed native close while a healthy page remains untouched", async () => {
+    const f = fixture();
+    const old = f.create("one");
+    old.close.mockImplementationOnce(() => { throw new Error("native failure"); });
+    await expect(f.pool.suspendNetworkAccount("one")).rejects.toThrow("ACCOUNT_VIEWS_CLOSE_FAILED");
+    old.close.mockImplementation(() => old.destroy());
+    const healthy = f.create("two");
+    await f.pool.retryNetworkAccountClose("two");
+    expect(healthy.close).not.toHaveBeenCalled();
+    await f.pool.retryNetworkAccountClose("one");
+    expect(old.close).toHaveBeenCalledTimes(2);
+    expect(old.destroyed).toBe(true);
   });
 
   it("lazily hosts automatic pages in one never-shown native window without extra contents", async () => {

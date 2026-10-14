@@ -87,8 +87,24 @@ export class AccountsRepository {
     const stored: AccountCheckInfo = {
       state: info.state, reason: info.reason, attemptedAt: info.attemptedAt,
       ...(confirmation !== undefined ? { homepageConfirmation } : {}),
+      ...(current.checkInfo?.creatorConfirmation !== undefined
+        ? { creatorConfirmation: current.checkInfo.creatorConfirmation } : {}),
     };
     this.db.run("UPDATE accounts SET check_info_json = ? WHERE id = ?", [JSON.stringify(stored), id]);
+    return this.get(id);
+  }
+
+  updateCreatorConfirmation(id: string, confirmation: HomepageConfirmation | null): Account | undefined {
+    const current = this.get(id);
+    if (!current) return undefined;
+    const valid = readHomepageConfirmation(confirmation);
+    if (confirmation !== null && !valid) throw new Error("管理后台登录证据无效");
+    const info: AccountCheckInfo = current.checkInfo ?? {
+      state: "unconfirmed", reason: "等待登录状态复核", attemptedAt: new Date().toISOString(),
+    };
+    this.db.run("UPDATE accounts SET check_info_json = ? WHERE id = ?", [
+      JSON.stringify({ ...info, creatorConfirmation: valid }), id,
+    ]);
     return this.get(id);
   }
 
@@ -233,6 +249,8 @@ function readCheckInfo(value?: string | null): AccountCheckInfo | null {
       attemptedAt: parsed.attemptedAt,
       ...(parsed.homepageConfirmation !== undefined
         ? { homepageConfirmation: readHomepageConfirmation(parsed.homepageConfirmation) } : {}),
+      ...(parsed.creatorConfirmation !== undefined
+        ? { creatorConfirmation: readHomepageConfirmation(parsed.creatorConfirmation) } : {}),
     };
   } catch {
     return null;

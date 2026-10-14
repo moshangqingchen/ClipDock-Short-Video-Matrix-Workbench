@@ -5,6 +5,17 @@
   color: var(--fg-subtle);
   margin-bottom: 10px;
 }
+.priority, .statsDetails, .trendSection { margin-bottom: 20px; }
+.statsDetails > summary {
+  cursor: pointer;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-weight: 600;
+}
+.statsDetails[open] > summary { margin-bottom: 16px; }
 .kpiRow {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

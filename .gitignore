@@ -36,6 +36,8 @@ Thumbs.db
 !.vscode/extensions.json
 
 # local scratch
+/backups/
+/logs/
 tmp-*
 __pycache__/
 output/

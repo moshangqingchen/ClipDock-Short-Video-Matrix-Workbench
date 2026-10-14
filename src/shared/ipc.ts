@@ -120,6 +120,8 @@ export interface AppInfo {
   chrome: string;
   userDataPath: string;
   userAgent: string;
+  dataMode?: "default" | "custom";
+  executablePath?: string;
 }
 
 export interface BackupImportResult {
@@ -159,6 +161,8 @@ export interface WorkbenchApi {
     navigate(id: string, url: string): Promise<void>;
     go(id: string, route: z.input<typeof viewGoSchema>): Promise<void>;
     reload(id: string): Promise<void>;
+    /** Retry failed connection cleanup and network qualification without clearing the profile. */
+    reconnect(id: string): Promise<void>;
     back(id: string): Promise<void>;
     forward(id: string): Promise<void>;
     stop(id: string): Promise<void>;

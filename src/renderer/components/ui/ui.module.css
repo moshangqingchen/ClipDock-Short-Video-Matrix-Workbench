@@ -621,3 +621,9 @@
 .delta.flat {
   color: var(--fg-subtle);
 }
+
+.loginStatus { display: inline-flex; align-items: center; flex-wrap: nowrap; gap: 5px; line-height: 16px; white-space: nowrap; }
+.loginStatus[data-detailed="true"] { flex-wrap: wrap; gap: 6px 12px; }
+.loginStatus > span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.loginStatus small { color: var(--fg-subtle); font-size: 11px; }
+.loginCheck { color: var(--fg-muted); border-left: 1px solid var(--line); padding-left: 6px; font-size: 11px; }

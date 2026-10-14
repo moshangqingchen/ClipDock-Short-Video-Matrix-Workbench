@@ -400,6 +400,7 @@ export class CollectScheduler {
     const deadline = new AbortController();
     const deadlineTimer = setTimeout(() => deadline.abort(), 180_000);
     const startedAt = new Date().toISOString();
+    const releaseBackgroundActivity = this.options.pool.retainBackgroundActivity?.(account.id);
     try {
       const collector = collectors.get(account.platformId);
       lease = beginBusinessOperation(account.id, collector?.workingUrl);
@@ -428,7 +429,7 @@ export class CollectScheduler {
       }
       if (job.trigger === "keepalive") {
         const checked = await withBusinessTaskSignal(signal, () => accounts.checkStatus(account.id,
-          account.platformId === "weixin_channels" ? { force: true, refreshPage: true } : undefined));
+          { force: true, keepaliveJobId: job.id, ...(account.platformId === "weixin_channels" ? { refreshPage: true } : {}) }));
         if (this.options.pool.getState(account.id)?.messageMode) throw new MessagePageInUseError();
         lease.assertCurrent();
         if (this.stopped || active.abort.signal.aborted || store.collectJobs.get(job.id)?.state !== "running")
@@ -680,6 +681,7 @@ export class CollectScheduler {
         metricsWrittenTotal, worksWrittenTotal, true, "incomplete");
     } finally {
       clearTimeout(deadlineTimer);
+      releaseBackgroundActivity?.();
       lease?.release();
     }
   }

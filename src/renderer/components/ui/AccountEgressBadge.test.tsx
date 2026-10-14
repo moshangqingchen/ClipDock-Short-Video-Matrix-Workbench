@@ -23,7 +23,7 @@ it("shows the measured city and keeps IP, full location and measured time in the
   expect(badge).not.toHaveTextContent(location.ip!);
   expect(badge.title).toContain("直连出口 IP：203.0.113.8");
   expect(badge.title).toContain("归属地：中国 · 广东省 · 深圳市");
-  expect(badge.title).toContain("2026/9/12");
+  expect(badge.title).toContain(new Date(location.checkedAt!).toLocaleString("zh-CN", { hour12: false }));
   expect(badge.title).toContain("IP归属地估测，可能与平台显示不同");
   expect(badge.tagName).toBe("SPAN");
   expect(screen.queryByRole("button")).not.toBeInTheDocument();

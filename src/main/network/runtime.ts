@@ -170,6 +170,7 @@ export class NetworkRuntime extends EventEmitter implements BusinessNetworkContr
   readonly gate: EgressGate;
   private readonly sessions = new WeakMap<NetworkSession, SessionEntry>();
   private readonly accounts = new Map<string, SessionEntry>();
+  private readonly reconnecting = new Map<string, Promise<void>>();
   private readonly options: NetworkRuntimeOptions;
   private readonly familyResolutions = new Set<SessionEntry>();
   private suspendHandler: (accountId: string) => void | Promise<void>;
@@ -471,6 +472,70 @@ export class NetworkRuntime extends EventEmitter implements BusinessNetworkContr
   /** Keep the account row, but retire authority until wipe completes and the factory registers again. */
   resetAccount(accountId: string): Promise<void> {
     return this.removeAccount(accountId);
+  }
+
+  /** Explicit repair of a failed native connection cleanup. Cookies and login storage are retained. */
+  reconnectAccount(accountId: string): Promise<void> {
+    const running = this.reconnecting.get(accountId);
+    if (running) return running;
+    const entry = this.accounts.get(accountId);
+    if (!entry || entry.retired || this.disposed) return Promise.reject(new Error("ACCOUNT_RECONNECT_UNAVAILABLE"));
+    // A normal network recheck must not close a healthy editor or message page.
+    if (!entry.failed) return Promise.resolve();
+    entry.ready = false;
+    this.abortExclusiveLeases(entry);
+    this.cancelDownloads(entry);
+    this.withdrawScope(entry);
+    entry.scope = null;
+    entry.selections = [];
+    entry.catalogs = [];
+    entry.pageSelectionKey = null;
+    entry.resettingGate = true;
+    try { this.gate.unregisterAccount(accountId); } finally { entry.resettingGate = false; }
+    const epoch = ++entry.epoch;
+    const current = () => !this.disposed && !entry.retired && this.accounts.get(accountId) === entry && entry.epoch === epoch;
+    const previous = entry.pending;
+    const suspension = this.notifySuspend(entry);
+    const repair = previous.catch(() => undefined).then(async () => {
+      if (!current()) throw new Error("ACCOUNT_RECONNECT_SUPERSEDED");
+      const cleanup = async () => {
+        const results = await Promise.allSettled([
+          entry.session.clearStorageData({ storages: ["serviceworkers"] }),
+          entry.session.closeAllConnections(),
+        ]);
+        if (results.some((result) => result.status === "rejected")) throw new Error("SESSION_RECONNECT_CLEANUP_FAILED");
+      };
+      const results = await Promise.allSettled([cleanup(), suspension]);
+      // A closing page can still complete a lookup. Clear DNS only after both
+      // request sources stop, also when a worker/connection cleanup step failed.
+      await entry.session.clearHostResolverCache();
+      if (!current()) throw new Error("ACCOUNT_RECONNECT_SUPERSEDED");
+      if (results.some((result) => result.status === "rejected")) throw new Error("SESSION_RECONNECT_CLEANUP_FAILED");
+      if (this.options.ruleSplitTransport) await this.options.ruleSplitTransport.configureSession(entry);
+      else await entry.session.setProxy({ mode: this.options.sessionProxyMode ?? "direct" });
+      if (!current()) throw new Error("ACCOUNT_RECONNECT_SUPERSEDED");
+      entry.contextId = randomUUID();
+      entry.initialized = true;
+      entry.failed = false;
+      entry.ready = true;
+      // No old proof or operation survives. The caller must prepare fresh operation scope.
+      this.emit("state", this.getAccountStates());
+    }).catch((error: unknown) => {
+      if (current()) {
+        entry.failed = true;
+        entry.ready = false;
+        this.record("SessionProtectionFailed", entry, "GATE_REVOKED");
+        this.emit("state", this.getAccountStates());
+      }
+      throw error;
+    });
+    entry.pending = repair;
+    const completion = repair.finally(() => {
+      if (this.reconnecting.get(accountId) === completion) this.reconnecting.delete(accountId);
+    });
+    this.reconnecting.set(accountId, completion);
+    void completion.catch(() => undefined);
+    return completion;
   }
 
   /** Read-only backup preflight, including identities retained after their database row was deleted. */

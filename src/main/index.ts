@@ -8,6 +8,7 @@ import { IPC } from "@shared/ipc";
 import { createStore, type Store } from "./db";
 import { ViewPool } from "./browser/view-pool";
 import { isHomepageContext } from "./browser/homepage-login";
+import { platformEntryUrl } from "@shared/platforms";
 import { AccountService } from "./services/account-service";
 import { createMainWindow, type MainWindow } from "./window/main-window";
 import { createWorkbenchTray, type WorkbenchTray } from "./window/tray";
@@ -143,6 +144,10 @@ let quitting = false;
 
 async function bootstrap(): Promise<void> {
   const store = createStore(path.join(userDataPath, "workbench.db"));
+  store.audit.append({ action: "session.lifecycle", details: {
+    phase: "startup", version: app.getVersion(),
+    dataDirectoryId: createHash("sha256").update(userDataPath).digest("hex").slice(0, 16),
+  } });
   await migrateGlobalBrowserPreferences(store.db, userDataPath);
   let windowsNetwork: WindowsNetworkFingerprintWatcher | null = null;
   let exclusiveSwitch: ExclusiveNetworkSwitch | null = null;
@@ -676,7 +681,16 @@ async function bootstrap(): Promise<void> {
   registerCredentialHandlers(ipc, vault, () => {
     invalidateNetwork();
   });
-  registerViewHandlers(ipc, pool, accounts);
+  registerViewHandlers(ipc, pool, accounts, async (id) => {
+    const account = accounts.get(id);
+    await pool.retryNetworkAccountClose(id);
+    await networkRuntime.reconnectAccount(id);
+    const current = pool.getState(id);
+    const target = pool.getRestoration(id)?.url ??
+      (current?.url?.startsWith("https://") ? current.url : platformEntryUrl(account.platformId));
+    accounts.prepareNetworkOperation(id, "view-navigate", target);
+    await Promise.all([network.refresh(), exclusiveSwitch?.refresh()]);
+  });
   registerSettingsHandlers(ipc, {
     store,
     pool,
@@ -838,6 +852,7 @@ app.on("before-quit", (event) => {
       // Each stage must run even if a native close fails. In particular, network
       // cleanup failure must not skip login persistence or closing the database.
       const steps: Array<[string, () => void | Promise<unknown>]> = [
+        ["shutdown diagnostic", () => rt.store.audit.append({ action: "session.lifecycle", details: { phase: "shutdown-start", version: app.getVersion() } })],
         ["window state", () => rt.mainWindow.flushState()],
         ["system tray", () => rt.tray?.dispose()],
         ["network observer", () => rt.network.stop()],
@@ -845,11 +860,13 @@ app.on("before-quit", (event) => {
         ["account tasks", () => rt.accounts.dispose()],
         [
           "account cookies",
-          () =>
-            Promise.race([
+          async () => {
+            await Promise.race([
               flushAccountSessionCookies(),
               new Promise((_, reject) => setTimeout(() => reject(new Error("COOKIE_FLUSH_TIMEOUT")), 7_000)),
-            ]),
+            ]);
+            rt.store.audit.append({ action: "session.lifecycle", details: { phase: "cookies-saved", version: app.getVersion() } });
+          },
         ],
         ["network sessions", () => rt.disposeNetwork()],
         ["account views", () => rt.pool.dispose()],

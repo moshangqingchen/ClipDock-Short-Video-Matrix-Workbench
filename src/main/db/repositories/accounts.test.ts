@@ -8,6 +8,22 @@ import { GLOBAL_PLATFORM_IDS } from "@shared/platforms";
 import type { Account, AccountCheckInfo, AccountCreateInput } from "@shared/types";
 
 describe("AccountsRepository", () => {
+  it("retains independent creator and homepage conclusions across checks and clears both on reset", () => {
+    const store = createStore(":memory:");
+    try {
+      const account = store.accounts.create({ platformId: "kuaishou" });
+      const observedAt = Date.now() - 1000;
+      store.accounts.updateStatus(account.id, "online", "主页在线");
+      store.accounts.updateCheckInfo(account.id, { state: "confirmed", reason: "主页在线", attemptedAt: new Date(observedAt).toISOString(), homepageConfirmation: { kind: "online", observedAt } });
+      store.accounts.updateCreatorConfirmation(account.id, { kind: "offline", observedAt });
+      store.accounts.updateCheckInfo(account.id, { state: "paused", reason: "网络暂停", attemptedAt: new Date().toISOString() });
+      const saved = store.accounts.get(account.id)!;
+      expect(saved.status).toBe("online");
+      expect(saved.checkInfo).toMatchObject({ homepageConfirmation: { kind: "online", observedAt }, creatorConfirmation: { kind: "offline", observedAt }, state: "paused" });
+      expect(() => store.accounts.updateCreatorConfirmation(account.id, { kind: "online", observedAt: Date.now() + 60000 })).toThrow();
+      expect(store.accounts.clearSessionState(account.id)?.checkInfo).toBeNull();
+    } finally { store.close(); }
+  });
   it("rejects international account creation even when callers bypass IPC types", () => {
     const store = createStore(":memory:");
     for (const platformId of GLOBAL_PLATFORM_IDS) {

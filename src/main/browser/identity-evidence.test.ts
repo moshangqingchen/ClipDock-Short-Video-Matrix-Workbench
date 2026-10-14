@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { isIdentityEndpoint, parseIdentityResponse } from "./identity-evidence";
+import { isIdentityEndpoint, parseIdentityResponse, identityResponseMetadata } from "./identity-evidence";
+
+describe("redacted identity failure diagnostics", () => {
+  const endpoint = "https://channels.weixin.qq.com/cgi-bin/mmfinderassistant-bin/auth/auth_data";
+  it("preserves the exact numeric auth error without query, response body or credentials", () => {
+    const meta = identityResponseMetadata("weixin_channels", endpoint + "?token=secret", 200,
+      JSON.stringify({ base_resp: { ret: 300333 }, sessionid: "secret", user: { username: "private" } }));
+    expect(meta).toEqual({ endpoint: new URL(endpoint).pathname, httpStatus: 200, platformCode: 300333 });
+    expect(JSON.stringify(meta)).not.toMatch(/secret|private|sessionid/);
+  });
+  it("ignores arbitrary codes and unreviewed destinations", () => {
+    expect(identityResponseMetadata("weixin_channels", endpoint, 403, '{"errCode":"secret"}'))
+      .toEqual({ endpoint: new URL(endpoint).pathname, httpStatus: 403 });
+    expect(identityResponseMetadata("weixin_channels", "https://example.com/auth?token=secret", 200, '{"errCode":300333}')).toEqual({});
+    expect(identityResponseMetadata("weixin_channels", endpoint, 200, '{"errCode":9007199254740991}').platformCode).toBeUndefined();
+  });
+});
 
 describe("current profile observation on additional platforms", () => {
   const cases = [

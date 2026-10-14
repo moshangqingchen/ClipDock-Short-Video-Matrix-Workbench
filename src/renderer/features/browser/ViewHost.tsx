@@ -65,15 +65,15 @@ export function ViewHost({ accountId, initialUrl, onError }: {
           const enterHomepage = newEntry && !initialUrl;
           // Claim the foreground before a work load, so background collectors
           // cannot borrow this account view and redirect it to management.
-          await api.views.show(accountId, measure(el) ?? initial, enterHomepage);
-          if (newEntry && initialUrl) {
+          const state = await api.views.show(accountId, measure(el) ?? initial, enterHomepage);
+          if (newEntry && initialUrl && !state.recoveryRequired) {
             if (cancelled) return;
             await api.views.navigate(accountId, initialUrl);
           }
           // A completed entry counts even if a modal hid the host while the IPC
           // was pending. A failed work navigation remains pending for retry.
           enteredAccount.current = accountId;
-          if (!cancelled) onError?.("");
+          if (!cancelled) onError?.(state.recoveryRequired ? state.recoveryMessage ?? "页面已中断，请选择入口重新打开" : "");
         } catch (error) {
           if (!cancelled) onError?.(error instanceof Error ? error.message : String(error));
         } finally {
@@ -90,9 +90,22 @@ export function ViewHost({ accountId, initialUrl, onError }: {
       });
     });
     observer.observe(el);
-    // Layout transitions (rail collapse, drawer) animate for ~320ms; keep
-    // polling briefly so the native view tracks the pane edge smoothly.
-    const interval = window.setInterval(() => sync(), 120);
+    // Follow moving ancestors during the ~320ms layout transition, then stop.
+    // A perpetual 120ms layout read wastes renderer work even when the pane is idle.
+    let interval: number | undefined;
+    let settleTimer: number | undefined;
+    const trackTransition = () => {
+      if (interval === undefined) interval = window.setInterval(() => sync(), 60);
+      window.clearTimeout(settleTimer);
+      settleTimer = window.setTimeout(() => {
+        window.clearInterval(interval);
+        interval = undefined;
+        sync();
+      }, 500);
+    };
+    trackTransition();
+    window.addEventListener("transitionrun", trackTransition, true);
+    window.addEventListener("transitionend", trackTransition, true);
     const resize = () => sync();
     window.addEventListener("resize", resize);
 
@@ -101,6 +114,9 @@ export function ViewHost({ accountId, initialUrl, onError }: {
       if (frame !== undefined) cancelAnimationFrame(frame);
       observer.disconnect();
       window.clearInterval(interval);
+      window.clearTimeout(settleTimer);
+      window.removeEventListener("transitionrun", trackTransition, true);
+      window.removeEventListener("transitionend", trackTransition, true);
       window.removeEventListener("resize", resize);
       void api.views.hide(accountId).catch(() => undefined);
     };

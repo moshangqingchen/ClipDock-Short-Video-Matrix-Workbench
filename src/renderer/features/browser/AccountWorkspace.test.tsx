@@ -211,7 +211,7 @@ describe("account workspace entry and management navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "消息" }));
     await act(async () => undefined);
     expect(screen.queryByRole("heading", { name: "账号数据" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "展开数据面板" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "展开辅助面板" })).toBeInTheDocument();
     expect(api.views.openMessages).toHaveBeenCalledExactlyOnceWith(account.id);
   });
 

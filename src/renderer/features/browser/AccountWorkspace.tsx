@@ -40,9 +40,11 @@ import {
 } from "@renderer/components/ui";
 import { api, hasBridge } from "@renderer/lib/api";
 import { useAccounts, useToasts, useUi, useViews } from "@renderer/store";
+import { useNetwork } from "@renderer/store/network";
 import { AccountMenu } from "@renderer/features/accounts/AccountMenu";
 import { ViewHost } from "./ViewHost";
 import { DataDrawer } from "./DataDrawer";
+import { PublishAssist } from "@renderer/features/publish/PublishAssist";
 import { ObservePanel } from "./ObservePanel";
 import { WorkspaceActions } from "@renderer/components/ui/WorkspaceActions";
 import styles from "./workspace.module.css";
@@ -93,6 +95,8 @@ function Workspace({ account }: { account: Account }) {
   const platform = getPlatform(account.platformId);
   const view = useViews((s) => s.states[account.id]);
   const drawerOpen = useUi((s) => s.drawerOpen);
+  const drawerTab = useUi((s) => s.drawerTab);
+  const setDrawerTab = useUi((s) => s.setDrawerTab);
   const toggleDrawer = useUi((s) => s.toggleDrawer);
   const sidebarHidden = useUi((s) => s.sidebarHidden);
   const toggleSidebar = useUi((s) => s.toggleSidebar);
@@ -107,6 +111,21 @@ function Workspace({ account }: { account: Account }) {
   const [observing, setObserving] = useState(false);
   const [openingMessages, setOpeningMessages] = useState(false);
   const [messageGuidance, setMessageGuidance] = useState("");
+  const [sessionAction, setSessionAction] = useState<"check" | "reconnect" | null>(null);
+  const connection = useNetwork((s) => s.snapshot.accounts.find((item) => item.accountId === account.id));
+  const runSessionAction = async (action: "check" | "reconnect") => {
+    if (sessionAction) return;
+    setSessionAction(action);
+    try {
+      if (action === "reconnect") {
+        await api.views.reconnect(account.id);
+        await useNetwork.getState().refresh();
+        setHostError(null);
+      } else await api.accounts.checkStatus(account.id);
+    } catch (error) {
+      useToasts.getState().push({ kind: "error", title: action === "check" ? "登录复核未完成" : "连接尚未恢复", message: error instanceof Error ? error.message : "请稍后重试" });
+    } finally { setSessionAction(null); }
+  };
   const messageRequest = useRef(0);
   useEffect(() => () => { messageRequest.current++; }, []);
   const pushOverlay = useUi((s) => s.pushOverlay);
@@ -284,7 +303,7 @@ function Workspace({ account }: { account: Account }) {
           </Button>
           <IconButton
             icon={drawerOpen ? PanelRightClose : PanelRightOpen}
-            label={drawerOpen ? "收起数据面板" : "展开数据面板"}
+            label={drawerOpen ? "收起辅助面板" : "展开辅助面板"}
             active={drawerOpen}
             onClick={() => toggleDrawer()}
           />
@@ -297,6 +316,23 @@ function Workspace({ account }: { account: Account }) {
       </header>
 
       <div className={styles.hostWrap}>
+        <section className={styles.sessionBar} aria-label="登录与连接状态">
+          <div>
+            <AccountLoginStatus account={account} detailed />
+            <span className={styles.connectionState}>连接：{connection?.state === "allowed" ? "可用" : connection?.state === "dormant" ? "已暂停" : "检查中或等待网络"}</span>
+          </div>
+          <div className={styles.sessionActions}>
+            <Button size="sm" variant="secondary" loading={sessionAction === "check"} disabled={Boolean(sessionAction)} onClick={() => void runSessionAction("check")}>复核登录</Button>
+            {connection?.state !== "allowed" || error ? <Button size="sm" variant="secondary" loading={sessionAction === "reconnect"} disabled={Boolean(sessionAction)} onClick={() => void runSessionAction("reconnect")}>重建连接</Button> : null}
+            {account.status === "offline" ? <Button size="sm" variant="secondary" onClick={() => go(platform.routes.site ? "site" : "home")}>{platform.routes.site ? "打开主页登录" : "打开平台登录"}</Button> : null}
+            {platform.routes.site && account.checkInfo?.creatorConfirmation?.kind === "offline" ?
+              <Button size="sm" variant="secondary" onClick={() => go("home")}>管理后台登录</Button> : null}
+          </div>
+        </section>
+        {view?.recoveryRequired ? <section className={styles.recoveryBar} role="status">
+          <span>{view.recoveryMessage ?? "页面已中断，请手动打开平台入口继续操作。"}</span>
+          <Button size="sm" variant="secondary" onClick={() => go(platform.routes.site ? "site" : "home")}>重新打开平台</Button>
+        </section> : null}
         {view?.messageMode || openingMessages ? (
           <section className={styles.messageBar} aria-label="消息与对话">
             <MessagesSquare size={18} />
@@ -383,7 +419,14 @@ function Workspace({ account }: { account: Account }) {
       </div>
 
       <aside className={styles.drawer} aria-hidden={!drawerOpen}>
-        {drawerOpen ? <DataDrawer account={account} onClose={() => toggleDrawer(false)} /> : null}
+        {drawerOpen ? <>
+          <div className={styles.drawerTabs} role="tablist" aria-label="辅助面板">
+            <button type="button" role="tab" aria-selected={drawerTab === "data"} onClick={() => setDrawerTab("data")}>账号数据</button>
+            <button type="button" role="tab" aria-selected={drawerTab === "publish"} onClick={() => setDrawerTab("publish")}>发布助手</button>
+            <IconButton icon={X} size="sm" label="关闭辅助面板" onClick={() => toggleDrawer(false)} />
+          </div>
+          {drawerTab === "publish" ? <PublishAssist scope="domestic" accountId={account.id} /> : <DataDrawer account={account} onClose={() => toggleDrawer(false)} />}
+        </> : null}
       </aside>
 
       {menuAnchor ? (

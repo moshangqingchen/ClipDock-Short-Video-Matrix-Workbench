@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Check,
   FileVideo2,
@@ -15,6 +15,7 @@ import {
   EmptyState,
   IconButton,
   Skeleton,
+  TextInput,
   cx,
   formatBytes,
   formatRelative,
@@ -29,23 +30,37 @@ export interface AssetsPageProps {
   selected?: string[];
   onToggle?: (id: string) => void;
   embedded?: boolean;
+  manageable?: boolean;
 }
 
 export function useAssets() {
   const [assets, setAssets] = useState<Asset[] | null>(null);
-  const reload = () =>
-    api.assets
-      .list()
-      .then(setAssets)
-      .catch(() => setAssets([]));
-  useEffect(() => {
-    void reload();
+  const [error, setError] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const sequence = useRef(0);
+  const reload = useCallback(async () => {
+    const request = ++sequence.current;
+    setLoading(true);
+    try {
+      const rows = await api.assets.list();
+      if (request === sequence.current) { setAssets(rows); setError(false); }
+    } catch {
+      if (request === sequence.current) setError(true);
+    } finally {
+      if (request === sequence.current) setLoading(false);
+    }
   }, []);
-  return { assets, reload, setAssets };
+  const invalidate = useCallback(() => { sequence.current++; }, []);
+  useEffect(() => {
+    let active = true;
+    void Promise.resolve().then(() => { if (active) void reload(); });
+    return () => { active = false; invalidate(); };
+  }, [reload, invalidate]);
+  return { assets, reload, setAssets, error, loading };
 }
 
 export function AssetsPage() {
-  const { assets, reload } = useAssets();
+  const { assets, reload, error, loading } = useAssets();
   const selected = useUi((s) => s.selectedAssetIds);
   const [importing, setImporting] = useState(false);
   const setRoute = useUi((s) => s.setRoute);
@@ -81,10 +96,16 @@ export function AssetsPage() {
           </Button>
         </div>
       </div>
+      {error && <div role="alert" className={styles.notice}>
+        <span>素材读取失败。{assets ? "已保留上次列表。" : "请重试读取。"}</span>
+        <Button size="sm" loading={loading} onClick={reload}>重试读取素材</Button>
+      </div>}
       <AssetGrid
         assets={assets}
+        loading={loading}
         onChanged={reload}
         selectable
+        manageable
         selected={selected}
         onToggle={(id) =>
           useUi
@@ -102,14 +123,34 @@ export function AssetGrid({
   assets,
   onChanged,
   selectable,
+  manageable = !selectable,
+  loading = true,
   selected = [],
   onToggle,
-}: { assets: Asset[] | null; onChanged: () => void } & AssetsPageProps) {
+}: { assets: Asset[] | null; onChanged: () => void; loading?: boolean } & AssetsPageProps) {
+  const [query, setQuery] = useState("");
+  const [kind, setKind] = useState("all");
+  const [page, setPage] = useState(0);
+  const [removing, setRemoving] = useState<string | null>(null);
+  const filtered = (assets ?? []).filter(asset =>
+    (kind === "all" || asset.kind === kind) && asset.fileName.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  const pageSize = 24;
+  const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const currentPage = Math.min(page, pages - 1);
+  const visible = filtered.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
   const remove = async (asset: Asset) => {
-    await api.assets.remove(asset.id);
-    onChanged();
+    if (removing) return;
+    setRemoving(asset.id);
+    try {
+      await api.assets.remove(asset.id);
+      useUi.getState().selectAssets(useUi.getState().selectedAssetIds.filter(id => id !== asset.id));
+      onChanged();
+    } catch (error) {
+      useToasts.getState().push({ kind: "error", title: "移出素材库失败", message: (error as Error).message });
+    } finally { setRemoving(null); }
   };
   if (!assets) {
+    if (!loading) return null;
     return (
       <div className={styles.grid}>
         {Array.from({ length: 6 }).map((_, i) => (
@@ -128,24 +169,35 @@ export function AssetGrid({
     );
   }
   return (
+    <>
+    <div className={styles.toolbar}>
+      <TextInput aria-label="搜索素材" placeholder="搜索文件名" value={query} onChange={event => { setQuery(event.target.value); setPage(0); }} />
+      <label>类型 <select aria-label="素材类型" value={kind} onChange={event => { setKind(event.target.value); setPage(0); }}>
+        <option value="all">全部类型</option><option value="video">视频</option><option value="image">图片</option><option value="audio">音频</option><option value="other">其他</option>
+      </select></label>
+      <span>{filtered.length} 个素材 · 已选 {selected.length} 个</span>
+    </div>
+    {!filtered.length && <p role="status" className={styles.notice}>没有匹配的素材，请调整搜索或类型。</p>}
     <div className={styles.grid}>
-      {assets.map((asset) => {
+      {visible.map((asset) => {
         const isSelected = selected.includes(asset.id);
         const KindIcon = asset.kind === "video" ? FileVideo2 : asset.kind === "image" ? ImageIcon : Music2;
         const src = hasBridge ? `sv-asset://${asset.thumbnailPath ? "thumb" : "file"}/${asset.id}` : null;
+        const Selection = selectable ? "button" : "div";
         return (
           <div
             key={asset.id}
             className={cx(styles.asset, isSelected && styles.selected)}
-            onClick={selectable ? () => onToggle?.(asset.id) : undefined}
-            role={selectable ? "button" : undefined}
-            tabIndex={selectable ? 0 : undefined}
           >
+            <Selection className={styles.assetSelect} type={selectable ? "button" : undefined}
+              aria-label={selectable ? `选择素材：${asset.fileName}` : undefined}
+              aria-pressed={selectable ? isSelected : undefined}
+              onClick={selectable ? () => onToggle?.(asset.id) : undefined}>
             <div className={styles.thumb}>
               {src && asset.kind === "video" && !asset.thumbnailPath ? (
-                <video src={src} muted preload="metadata" />
+                <LazyVideo src={src} />
               ) : src && (asset.kind === "image" || asset.thumbnailPath) ? (
-                <img src={src} alt="" />
+                <img src={src} alt="" loading="lazy" decoding="async" />
               ) : (
                 <KindIcon size={30} />
               )}
@@ -165,20 +217,42 @@ export function AssetGrid({
                 <em style={{ fontStyle: "normal" }}>{formatRelative(asset.createdAt)}</em>
               </span>
             </div>
-            {!selectable ? (
-              <div className={styles.actions} onClick={(e) => e.stopPropagation()}>
+            </Selection>
+            {manageable ? (
+              <div className={styles.actions}>
                 <IconButton
                   icon={FolderOpen}
-                  label="在文件夹中显示"
+                  label={`在文件夹中显示：${asset.fileName}`}
                   size="sm"
-                  onClick={() => void api.assets.reveal(asset.id)}
+                  onClick={() => void api.assets.reveal(asset.id).catch(() => useToasts.getState().push({ kind: "error", title: "无法打开素材所在文件夹" }))}
                 />
-                <IconButton icon={Trash2} label="移出素材库" size="sm" onClick={() => void remove(asset)} />
+                <IconButton icon={Trash2} label={`移出素材库：${asset.fileName}`} disabled={Boolean(removing)} size="sm" onClick={() => void remove(asset)} />
               </div>
             ) : null}
           </div>
         );
       })}
     </div>
+    {pages > 1 && <div className={styles.pagination} aria-label="素材分页">
+      <Button size="sm" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>上一页</Button>
+      <span>第 {currentPage + 1} / {pages} 页</span>
+      <Button size="sm" disabled={currentPage === pages - 1} onClick={() => setPage(currentPage + 1)}>下一页</Button>
+    </div>}
+    </>
   );
+}
+
+function LazyVideo({ src }: { src: string }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  const [visible, setVisible] = useState(() => typeof IntersectionObserver === "undefined");
+  useEffect(() => {
+    const video = ref.current;
+    if (!video || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) { setVisible(true); observer.disconnect(); }
+    }, { rootMargin: "120px" });
+    observer.observe(video);
+    return () => observer.disconnect();
+  }, []);
+  return <video ref={ref} src={visible ? src : undefined} muted preload={visible ? "metadata" : "none"} />;
 }

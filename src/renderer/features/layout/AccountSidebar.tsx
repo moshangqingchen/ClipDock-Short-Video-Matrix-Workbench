@@ -246,9 +246,9 @@ function AccountRow({
             <strong>{account.displayName}</strong>
             <AccountEgressBadge location={egressLocation} />
           </div>
-          <span>
-            <AccountLoginStatus account={account} />
-            {followers != null ? <span className="num">· {formatNumber(followers)} 粉丝</span> : null}
+          <span className={styles.accountSummary}>
+            <AccountLoginStatus account={account} compact />
+            {followers != null ? <span className={cx("num", styles.accountFollowers)} title={`${formatNumber(followers, false)} 粉丝`}>· {formatNumber(followers)} 粉丝</span> : null}
             {live ? (
               <span
                 className={styles.liveTag}

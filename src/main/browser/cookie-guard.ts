@@ -5,9 +5,11 @@ const PERSIST_DAYS = 30;
 const guards = new Set<CookieGuard>();
 const sessionCookieRevisions = new WeakMap<Session, number>();
 export interface CookieDiagnostic {
-  phase: "restore" | "persist" | "flush";
+  phase: "restore" | "persist" | "flush" | "change";
   outcome: "success" | "failed" | "timeout";
   pending: number;
+  cause?: string;
+  removed?: boolean;
   cookies?: Array<Pick<Cookie, "name" | "domain" | "path" | "hostOnly" | "secure" | "httpOnly" | "sameSite" | "session" | "expirationDate">>;
 }
 export interface CookieGuardOptions {
@@ -44,9 +46,10 @@ export class CookieGuard {
     session.cookies.on("changed", this.onChanged);
   }
   private key(cookie: Cookie): string { return `${cookie.domain ?? ""}\n${cookie.path ?? "/"}\n${cookie.name}`; }
-  private diagnostic(phase: CookieDiagnostic["phase"], outcome: CookieDiagnostic["outcome"], cookies?: Cookie[]): void {
+  private diagnostic(phase: CookieDiagnostic["phase"], outcome: CookieDiagnostic["outcome"], cookies?: Cookie[], change?: Pick<CookieDiagnostic, "cause" | "removed">): void {
     try {
       this.options.onDiagnostic?.({ phase, outcome, pending: this.pending.size,
+        ...change,
         ...(cookies ? { cookies: cookies.filter((c) => this.relevant(c)).map((c) => ({
           name: c.name, domain: c.domain, path: c.path, hostOnly: c.hostOnly,
           secure: c.secure, httpOnly: c.httpOnly, sameSite: c.sameSite,
@@ -72,8 +75,15 @@ export class CookieGuard {
   private relevant(cookie: Cookie): boolean {
     return this.domains.some((d) => hostMatches((cookie.domain ?? "").replace(/^\./, ""), d));
   }
-  private readonly onChanged = (_event: unknown, cookie: Cookie, _cause: string, removed: boolean) => {
+  private readonly onChanged = (_event: unknown, cookie: Cookie, cause: string, removed: boolean) => {
     if (this.disposed || !this.relevant(cookie)) return;
+    const login = getPlatform(this.platformId).login.sessionCookies;
+    const authenticationCookie = [...login.required, ...(login.anyOf ?? [])].includes(cookie.name) ||
+      this.platformId === "kuaishou" && /^kuaishou\.(?:web\.cp\.api|server\.web(?:day7)?)_(?:st|ph)$/.test(cookie.name);
+    if (authenticationCookie) this.diagnostic("change", "success", [cookie], {
+      cause: ["inserted", "inserted-no-change-overwrite", "inserted-no-value-change-overwrite", "explicit", "overwrite", "expired", "evicted", "expired-overwrite"].includes(cause) ? cause : "other",
+      removed,
+    });
     sessionCookieRevisions.set(this.session, (sessionCookieRevisions.get(this.session) ?? 0) + 1);
     const key = this.key(cookie);
     this.revisions.set(key, (this.revisions.get(key) ?? 0) + 1);
@@ -83,8 +93,7 @@ export class CookieGuard {
     if (!removed && cookie.session) void this.persist(cookie);
     if (this.flushTimer) clearTimeout(this.flushTimer);
     this.flushTimer = setTimeout(() => { this.flushTimer = undefined; void this.flush(); }, 2_000);
-    const login = getPlatform(this.platformId).login.sessionCookies;
-    if ([...login.required, ...(login.anyOf ?? [])].includes(cookie.name) && this.options.onSessionCookiesChanged) {
+    if (authenticationCookie && this.options.onSessionCookiesChanged) {
       if (this.notifyTimer) clearTimeout(this.notifyTimer);
       this.notifyTimer = setTimeout(() => {
         this.notifyTimer = undefined;

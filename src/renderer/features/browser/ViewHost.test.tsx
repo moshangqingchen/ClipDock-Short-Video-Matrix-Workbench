@@ -3,6 +3,7 @@ import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@renderer/lib/api";
 import { useUi } from "@renderer/store";
+import { useNetwork } from "@renderer/store/network";
 import { ViewHost } from "./ViewHost";
 
 function deferred() {
@@ -22,6 +23,7 @@ describe("ViewHost native visibility lifecycle", () => {
     visible = null;
     requests = [];
     useUi.setState({ overlayCount: 0 });
+    useNetwork.setState((state) => ({ snapshot: { ...state.snapshot, accounts: [] } }));
     vi.spyOn(api.views, "show").mockImplementation(async (id) => {
       const request = deferred();
       requests.push(request);
@@ -150,6 +152,37 @@ describe("ViewHost native visibility lifecycle", () => {
     expect(api.views.navigate).toHaveBeenCalledTimes(1);
     expect(api.views.show).toHaveBeenLastCalledWith("owner", expect.any(Object), false);
     await act(async () => requests[1].resolve());
+  });
+
+  it("does not replay a saved work URL over an interrupted editor or QR recovery notice", async () => {
+    const onError = vi.fn();
+    vi.mocked(api.views.show).mockResolvedValueOnce({
+      accountId: "owner", recoveryRequired: true, recoveryMessage: "网络中断，请重新打开入口",
+    } as Awaited<ReturnType<typeof api.views.show>>);
+    render(<ViewHost accountId="owner" initialUrl="https://www.douyin.com/video/123" onError={onError} />);
+    await act(async () => undefined);
+    expect(api.views.navigate).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenLastCalledWith("网络中断，请重新打开入口");
+  });
+
+  it("lets the main-process pool restore the same account's saved context after network recovery", async () => {
+    const network = (state: "allowed" | "dormant", generation: number) => useNetwork.setState((store) => ({
+      snapshot: { ...store.snapshot, accounts: [{ accountId: "one", state, generation,
+        reason: state === "allowed" ? "READY" : "NETWORK_CHANGED", checkedAt: null, proofExpiresAt: null }] },
+    }));
+    network("allowed", 1);
+    render(<ViewHost accountId="one" />);
+    await act(async () => undefined);
+    await act(async () => requests[0].resolve());
+    act(() => network("dormant", 2));
+    await act(async () => undefined);
+    await act(async () => requests[1].reject(new Error("等待国内网络")));
+    act(() => network("allowed", 3));
+    await act(async () => undefined);
+    expect(api.views.show).toHaveBeenLastCalledWith("one", expect.any(Object), false);
+    await act(async () => requests[2].resolve());
+    expect(api.views.navigate).not.toHaveBeenCalled();
+    expect(visible).toBe("one");
   });
 
   it("does not start work navigation after its pending show was cancelled by an account switch", async () => {

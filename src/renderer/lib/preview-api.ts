@@ -477,6 +477,7 @@ export function createPreviewApi(): WorkbenchApi {
       navigate: async () => undefined,
       go: async () => undefined,
       reload: async () => undefined,
+      reconnect: async () => undefined,
       back: async () => undefined,
       forward: async () => undefined,
       stop: async () => undefined,

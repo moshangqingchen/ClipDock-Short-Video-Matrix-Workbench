@@ -50,8 +50,7 @@ export function OverviewPage() {
   const [trendMetric, setTrendMetric] = useState<MetricName>("followers");
   const accounts = useAccounts((s) => s.accounts);
   const openAccount = useUi((s) => s.openAccount);
-  const setRoute = useUi((s) => s.setRoute);
-  const setMetricsPlatform = useUi((s) => s.setMetricsPlatform);
+  const openPlatformMetrics = useUi((s) => s.openPlatformMetrics);
   const setAddAccountOpen = useUi((s) => s.setAddAccountOpen);
 
   const collectAll = async () => {
@@ -89,6 +88,57 @@ export function OverviewPage() {
       <CollectQueue />
       {error && <div role="alert" className={styles.notice}><span>总览读取失败。{data ? "已保留上次结果。" : "请重试读取本地数据。"}</span><Button size="sm" onClick={retry}>重试读取</Button></div>}
       {data && !data.accountCount && <div role="status" className={styles.notice}>还没有账号。添加并登录账号后，可通过「全部采集」读取数据。</div>}
+      <section className={styles.priority} aria-label="需要处理的账号">
+        <Card>
+          <div className={styles.cardHead}>
+            <div>
+              <h3>需要关注</h3>
+              <p>掉线、需验证或即将过期的账号</p>
+            </div>
+          </div>
+          {!data && loading ? (
+            <Skeleton height={120} />
+          ) : !data ? <p>暂无可用状态，请重试读取总览。</p> : data.attention.length === 0 ? (
+            <div className={styles.okState}>
+              <CheckCircle2 size={18} />
+              所有账号状态正常
+            </div>
+          ) : (
+            <div className={styles.attentionList}>
+              {data.attention.map((item) => {
+                const account = accounts.find((a) => a.id === item.accountId);
+                return (
+                  <div
+                    key={item.accountId}
+                    className={styles.attentionItem}
+                    onClick={() => openAccount(item.accountId)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openAccount(item.accountId); } }}
+                  >
+                    <Avatar
+                      src={account?.avatarUrl}
+                      name={item.displayName}
+                      color={PLATFORMS[item.platformId].color}
+                      size={32}
+                      round
+                    />
+                    <div className={styles.attentionMeta}>
+                      <strong className="truncate">{item.displayName}</strong>
+                      <span className="truncate">
+                        <StatusDot status={item.status} /> {STATUS_LABEL[item.status]} · {item.message}
+                      </span>
+                    </div>
+                    <ArrowRight size={14} color="var(--fg-subtle)" />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
+      </section>
+      <details className={styles.statsDetails}>
+        <summary>全部数据与今日观测</summary>
       <h3 className={styles.rowTitle}>全部数据</h3>
       <div className={cx(styles.kpiRow, styles.kpiRow5)}>
         <Kpi
@@ -112,7 +162,9 @@ export function OverviewPage() {
           sub={data ? `${data.dayCoverage?.[metric] ?? 0}/${data.accountCount} 个账号可比较 · 北京时间 0 点` : undefined} />)}
       </div>
 
-      <div className={styles.grid}>
+      </details>
+
+      <div className={styles.trendSection}>
         <Card>
           <div className={styles.cardHead}>
             <div>
@@ -190,52 +242,7 @@ export function OverviewPage() {
           </div>
         </Card>
 
-        <Card>
-          <div className={styles.cardHead}>
-            <div>
-              <h3>需要关注</h3>
-              <p>掉线、需验证或即将过期的账号</p>
-            </div>
-          </div>
-          {!data && loading ? (
-            <Skeleton height={120} />
-          ) : !data ? <p>暂无可用状态，请重试读取总览。</p> : data.attention.length === 0 ? (
-            <div className={styles.okState}>
-              <CheckCircle2 size={18} />
-              所有账号状态正常
-            </div>
-          ) : (
-            <div className={styles.attentionList}>
-              {data.attention.map((item) => {
-                const account = accounts.find((a) => a.id === item.accountId);
-                return (
-                  <div
-                    key={item.accountId}
-                    className={styles.attentionItem}
-                    onClick={() => openAccount(item.accountId)}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <Avatar
-                      src={account?.avatarUrl}
-                      name={item.displayName}
-                      color={PLATFORMS[item.platformId].color}
-                      size={32}
-                      round
-                    />
-                    <div className={styles.attentionMeta}>
-                      <strong className="truncate">{item.displayName}</strong>
-                      <span className="truncate">
-                        <StatusDot status={item.status} /> {STATUS_LABEL[item.status]} · {item.message}
-                      </span>
-                    </div>
-                    <ArrowRight size={14} color="var(--fg-subtle)" />
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </Card>
+
       </div>
 
       <div className={styles.platformGrid}>
@@ -246,8 +253,7 @@ export function OverviewPage() {
               key={platform.platformId}
               interactive
               onClick={() => {
-                setMetricsPlatform(platform.platformId);
-                setRoute("metrics");
+                openPlatformMetrics(platform.platformId);
               }}
               className={styles.platformCard}
             >
