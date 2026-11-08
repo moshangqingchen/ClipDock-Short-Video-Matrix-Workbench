@@ -6,7 +6,7 @@ export interface HomepageLoginVerdict {
   source: "homepage";
   /** Current-account avatar source only; the main process must validate/cache it before display. */
   avatarUrl?: string;
-  /** Nickname from a dedicated current-account store, never a page author/title. */
+  /** Nickname from a dedicated account store or avatar-bound own-profile UI. */
   displayName?: string;
 }
 
@@ -233,7 +233,43 @@ export function buildHomepageLoginScript(platformId: PlatformId): string {
         }
         if (selfAvatars.size === 1) {
           accountAvatar = true;
-          domAvatars.add(Array.from(selfAvatars)[0]);
+          const selfAvatar = Array.from(selfAvatars)[0];
+          domAvatars.add(selfAvatar);
+          // Jingxuan no longer exposes the old __INITIAL_STATE__ account
+          // stores. On the literal own-profile route, bind its live title to
+          // the signed-in header by their avatar asset before importing it.
+          // The two images use different sizes, formats and CDN signatures;
+          // compare their asset path only, without rewriting either URL.
+          const avatarKey = value => {
+            try {
+              const url = new URL(value);
+              if (!/(^|\\.)douyinpic\\.com$/.test(url.hostname)) return value;
+              const match = url.pathname.match(/\\/aweme-avatar\\/([^/~.]+)/);
+              return match ? 'douyin-avatar:' + match[1] : value;
+            } catch { return undefined; }
+          };
+          if (/^\\/user\\/self\\/?$/.test(page.pathname)) {
+            const roots = Array.from(document.querySelectorAll('[data-e2e="user-info"]'))
+              .filter(root => visible(root) && !root.closest('header, article, [data-e2e="douyin-header"], ' +
+                '[data-e2e="feed-active-video"], [data-e2e="feed-video"], .video-card'));
+            if (roots.length === 1) {
+              const root = roots[0];
+              const titles = Array.from(root.querySelectorAll(':scope > div > h1')).filter(visible);
+              const avatarRoot = root.previousElementSibling;
+              const images = avatarRoot && visible(avatarRoot)
+                ? Array.from(avatarRoot.querySelectorAll('img')).filter(visible) : [];
+              const name = titles.length === 1 ? titles[0].textContent.trim() : '';
+              const avatar = images.length === 1 && safeAvatarUrl(images[0].currentSrc || images[0].getAttribute('src'));
+              if (name && name.length <= 60 && !/^(?:登录|立即登录|登录注册|登录\\/注册|去登录|游客)$/.test(name.replace(/\\s+/g, '')) &&
+                  avatar && avatarKey(avatar) === avatarKey(selfAvatar)) {
+                storeNames.clear();
+                storeNames.add(name);
+                storeAvatars.clear();
+                storeAvatars.add(selfAvatar);
+                storeLoggedOut = false;
+              }
+            }
+          }
         }
       }
       // Kuaishou replaces this dedicated sidebar account control after QR

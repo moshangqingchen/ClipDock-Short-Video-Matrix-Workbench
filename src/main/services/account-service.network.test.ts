@@ -727,6 +727,63 @@ describe("identity checks and attempt feedback", () => {
 });
 
 describe("independent creator login evidence", () => {
+  it("confirms Xiaohongshu's own identity before long-running page resources finish loading", async () => {
+    const f = fixture("offline", true, undefined, "xiaohongshu");
+    const page = { url: "https://creator.xiaohongshu.com/new/home", loading: true,
+      instanceId: 1, navigationId: 1 } as ViewState;
+    f.viewPool.getState.mockReturnValue(page);
+    const evidence: IdentityEvidence = { kind: "online", key: "xhs-self-during-load", sequence: 1,
+      observedAt: Date.now(), reason: "平台网页已确认登录身份", subject: "synthetic-self",
+      endpoint: "/api/galaxy/user/info", httpStatus: 200, platformCode: 0 };
+    f.viewPool.getIdentityEvidence.mockReturnValue(evidence);
+    const changed = vi.fn(); f.service.on("account-changed", changed);
+
+    f.service.onActivity(f.account.id, "identity");
+    expect(f.service.get(f.account.id)).toMatchObject({ status: "offline", checkInfo: {
+      creatorConfirmation: { kind: "online", observedAt: evidence.observedAt },
+    } });
+    expect(changed).toHaveBeenCalledOnce();
+    expect(f.service.get(f.account.id).checkInfo?.homepageConfirmation).toBeUndefined();
+
+    // The identity observer expires the short-lived response before unrelated
+    // resources stop loading. Its confirmed login must already be persisted.
+    await vi.advanceTimersByTimeAsync(31_000);
+    f.viewPool.getIdentityEvidence.mockReturnValue(null);
+    f.viewPool.getState.mockReturnValue({ ...page, loading: false });
+    f.service.onActivity(f.account.id, "loaded");
+    expect(f.service.get(f.account.id).checkInfo?.creatorConfirmation)
+      .toEqual({ kind: "online", observedAt: evidence.observedAt });
+    expect(f.service.get(f.account.id).status).toBe("offline");
+    expect(f.store.audit.list().filter(row => row.action === "session.identity")).toHaveLength(1);
+    expect(f.notify).not.toHaveBeenCalled();
+  });
+  it.each([
+    { subject: undefined }, { endpoint: undefined }, { httpStatus: undefined },
+    { httpStatus: 401 }, { httpStatus: 429 }, { kind: "unconfirmed" as const },
+    { kind: "offline" as const },
+  ])("does not bypass loading without a conclusive reviewed identity: %j", patch => {
+    const f = fixture("offline", true, undefined, "xiaohongshu");
+    f.viewPool.getState.mockReturnValue({ url: "https://creator.xiaohongshu.com/new/home", loading: true } as ViewState);
+    f.viewPool.getIdentityEvidence.mockReturnValue({ kind: "online", key: "incomplete", sequence: 1,
+      observedAt: Date.now(), reason: "synthetic", subject: "synthetic-self",
+      endpoint: "/api/galaxy/user/info", httpStatus: 200, ...patch });
+    f.service.onActivity(f.account.id, "identity");
+    expect(f.service.get(f.account.id).checkInfo?.creatorConfirmation).toBeUndefined();
+  });
+  it.each([
+    { url: "https://creator.xiaohongshu.com/login" },
+    { url: "https://www.xiaohongshu.com/explore" },
+    { url: "https://creator.xiaohongshu.com.evil.test/new/home" },
+    { isVerificationPage: true }, { lastError: "ERR_TIMED_OUT" },
+  ])("does not use an early identity to bypass an unsafe creator page: %j", patch => {
+    const f = fixture("offline", true, undefined, "xiaohongshu");
+    f.viewPool.getState.mockReturnValue({ url: "https://creator.xiaohongshu.com/new/home", loading: true, ...patch } as ViewState);
+    f.viewPool.getIdentityEvidence.mockReturnValue({ kind: "online", key: "wrong-page", sequence: 1,
+      observedAt: Date.now(), reason: "synthetic", subject: "synthetic-self",
+      endpoint: "/api/galaxy/user/info", httpStatus: 200 });
+    f.service.onActivity(f.account.id, "identity");
+    expect(f.service.get(f.account.id).checkInfo?.creatorConfirmation).toBeUndefined();
+  });
   it("records each safe identity observation once and keeps creator login separate from homepage login", () => {
     const f = fixture("offline", true, undefined, "kuaishou");
     f.viewPool.getState.mockReturnValue({ url: getPlatform("kuaishou").routes.home, loading: false } as ViewState);
@@ -1052,6 +1109,8 @@ describe("homepage login authority lifecycle", () => {
     const retained = await f.service.checkStatus(f.account.id, { force: true });
     expect(retained.status).toBe("online");
     expect(retained.lastOnlineAt).toBe(confirmed.lastOnlineAt);
+    expect(retained.checkInfo).toMatchObject({ state: "unconfirmed", retainedHomepage: true,
+      homepageConfirmation: confirmed.checkInfo?.homepageConfirmation });
     expect(evaluate).toHaveBeenCalledOnce();
     expect(f.session.fetch).not.toHaveBeenCalled();
     expect(f.session.cookies.get).not.toHaveBeenCalled();
@@ -1061,6 +1120,43 @@ describe("homepage login authority lifecycle", () => {
     expect((await f.service.checkStatus(f.account.id, { force: true })).status).toBe("online");
     expect(f.service.get(f.account.id).lastOnlineAt).toBe(confirmed.lastOnlineAt);
     expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it("distinguishes a retained homepage on the management page from a new unresolved homepage check", async () => {
+    const f = fixture("offline", true, undefined, "xiaohongshu");
+    const evaluate = homepage(f);
+    const confirmed = await f.service.checkStatus(f.account.id, { force: true });
+    const proof = confirmed.checkInfo?.homepageConfirmation;
+    const management = { url: getPlatform("xiaohongshu").routes.home, loading: false,
+      instanceId: 1, navigationId: 2 } as ViewState;
+    vi.setSystemTime(Date.now() + 10_000);
+    f.viewPool.getState.mockReturnValue(management);
+    const retained = await f.service.checkStatus(f.account.id, { force: true });
+    expect(retained.checkInfo).toMatchObject({ state: "unconfirmed", retainedHomepage: true, homepageConfirmation: proof });
+    expect(retained.lastOnlineAt).toBe(confirmed.lastOnlineAt);
+
+    f.viewPool.getState.mockReturnValue({ ...management, url: getPlatform("xiaohongshu").routes.site!, navigationId: 3 });
+    evaluate.mockResolvedValue({ kind: "unconfirmed", source: "homepage", reason: "主页身份尚未加载" });
+    const pending = await f.service.checkStatus(f.account.id, { force: true });
+    expect(pending.checkInfo?.state).toBe("unconfirmed");
+    expect(pending.checkInfo?.retainedHomepage).toBeUndefined();
+    expect(pending.checkInfo?.homepageConfirmation).toEqual(proof);
+    expect(pending.lastOnlineAt).toBe(confirmed.lastOnlineAt);
+
+    f.viewPool.getState.mockReturnValue(management);
+    expect((await f.service.checkStatus(f.account.id, { force: true })).checkInfo?.retainedHomepage).toBe(true);
+    f.viewPool.getState.mockReturnValue({ ...management, lastError: "ERR_TIMED_OUT" });
+    const failure = await f.service.checkStatus(f.account.id, { force: true });
+    expect(failure.checkInfo?.state).toBe("network_error");
+    expect(failure.checkInfo?.retainedHomepage).toBeUndefined();
+    expect(failure.checkInfo?.homepageConfirmation).toEqual(proof);
+
+    f.viewPool.getState.mockReturnValue(management);
+    expect((await f.service.checkStatus(f.account.id, { force: true })).checkInfo?.retainedHomepage).toBe(true);
+    homepage(f);
+    const rechecked = await f.service.checkStatus(f.account.id, { force: true });
+    expect(rechecked.checkInfo?.state).toBe("confirmed");
+    expect(rechecked.checkInfo?.retainedHomepage).toBeUndefined();
+    expect(rechecked.checkInfo?.homepageConfirmation?.observedAt).toBe(Date.now());
   });
   it("does not let creator identity overwrite a homepage logout", async () => {
     const f = fixture("online", true, undefined, "kuaishou");

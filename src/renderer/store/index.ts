@@ -224,19 +224,33 @@ interface SettingsState {
   patch(patch: Partial<AppSettings>): Promise<void>;
 }
 
-export const useSettings = create<SettingsState>((set, get) => ({
+let settingsQueue: Promise<void> = Promise.resolve();
+
+/** Preserve user edit order and prevent an older settings read from replacing a saved change. */
+function enqueueSettings(operation: () => Promise<void>): Promise<void> {
+  const task = settingsQueue.then(operation);
+  settingsQueue = task.catch(() => undefined);
+  return task;
+}
+
+export const useSettings = create<SettingsState>((set) => ({
   settings: { ...DEFAULT_SETTINGS },
   loaded: false,
-  async load() {
-    const settings = await api.settings.get();
-    set({ settings, loaded: true });
-    useUi.setState({ theme: settings.theme, railCollapsed: settings.sidebarCollapsed });
+  load() {
+    return enqueueSettings(async () => {
+      const settings = await api.settings.get();
+      set({ settings, loaded: true });
+      useUi.setState({ theme: settings.theme, railCollapsed: settings.sidebarCollapsed });
+    });
   },
-  async patch(patch) {
-    const settings = await api.settings.set(patch);
-    set({ settings });
-    if (patch.theme) useUi.setState({ theme: settings.theme });
-    void get;
+  patch(patch) {
+    return enqueueSettings(async () => {
+      const settings = await api.settings.set(patch);
+      set({ settings });
+      if (patch.theme !== undefined) useUi.setState({ theme: settings.theme });
+      if (patch.sidebarCollapsed !== undefined)
+        useUi.setState({ railCollapsed: settings.sidebarCollapsed });
+    });
   },
 }));
 

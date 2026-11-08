@@ -2,7 +2,7 @@
 
 面向 Windows 10/11 的桌面应用,用一个窗口管理 **抖音、快手、小红书、哔哩哔哩、百度百家号、微信视频号** 上的多个账号。每个账号拥有完全独立的浏览器环境(Cookie / 本地存储 / 缓存互不串号),登录在平台官方页面完成,账号数据(粉丝、获赞、评论、播放、作品)在账号自己的会话内只读采集并长期记录。
 
-当前源码版本为 **1.0.6-rc.12**。修复上一版账号列表文字重叠，详见[排版修复说明](docs/releases/v1.0.6-rc.12.md)。1.0.6-rc.11 修复登录复核被自身任务阻止、网页加载时短暂未登录误判及网络恢复跳错入口；加入主页/管理后台独立状态、连接重建、账号草稿恢复和发布侧栏，详见[版本说明](docs/releases/v1.0.6-rc.11.md)。快手当前账号识别见 [1.0.6-rc.10](docs/releases/v1.0.6-rc.10.md)，六平台昵称头像同步见 [1.0.6-rc.9](docs/releases/v1.0.6-rc.9.md)。账号工具栏的[“消息”入口](docs/releases/v1.0.6-rc.7.md)使用官方消息页查看和手动回复；六平台八项基础指标、趋势和经营分析见 [1.0.6-rc.6](docs/releases/v1.0.6-rc.6.md)。实际数据及私信能力受各账号官方权限限制；平台服务端会话期限无法由本地持久化保证，视频号隔夜登录仍需实测。
+当前源码版本为 **1.1.0-rc.4**：补齐抖音精选新版主页的昵称与头像同步，详见[升级说明](docs/releases/v1.1.0-rc.4.md)。延续 1.1.0 的[插画界面、全局搜索与数据覆盖板块](docs/releases/v1.1.0-rc.1.md)，以及[后台登录确认](docs/releases/v1.1.0-rc.2.md)、[登录状态显示](docs/releases/v1.1.0-rc.3.md)修复。此前 1.0.6-rc.12 的账号列表排版见[说明](docs/releases/v1.0.6-rc.12.md)，快手当前账号识别见 [1.0.6-rc.10](docs/releases/v1.0.6-rc.10.md)，六平台昵称头像同步见 [1.0.6-rc.9](docs/releases/v1.0.6-rc.9.md)。账号工具栏的[“消息”入口](docs/releases/v1.0.6-rc.7.md)使用官方消息页查看和手动回复；六平台八项基础指标、趋势和经营分析见 [1.0.6-rc.6](docs/releases/v1.0.6-rc.6.md)。实际数据及私信能力受各账号官方权限限制；平台服务端会话期限无法由本地持久化保证，视频号隔夜登录仍需实测。
 
 ## 功能
 
@@ -97,6 +97,16 @@ scripts/       build-electron(esbuild)、dev 启动、Electron 冒烟、CDP 调�
 - `window-state.json` — 窗口位置
 
 ## 仓库文件维护
+
+### 安装维护备份
+
+通过 `scripts/start-installed-workbench.ps1 -ScriptPath` 运行 `scripts/run-installed-maintenance.ps1`，使用 `FullBackup` 或 `DatabaseBackup` 操作。维护脚本直接使用项目内 `.local-data/历史资料/安装程序备份/`；现有账号运行目录继续沿用身份检查确认的物理路径。
+
+- 完整备份保留程序、数据库、Cookies、Local State、Local Storage、IndexedDB 和浏览器配置；只排除用户数据根及已知浏览器配置树内的 `Cache`、`Code Cache`、`GPUCache`、`DawnGraphiteCache`、`DawnWebGPUCache`、`GrShaderCache`、`ShaderCache`。Service Worker 和 CacheStorage 保留。
+- 程序／数据库备份只复制程序与 SQLite 一致性快照，不重复复制浏览器资料；另记录最近一次完整备份的位置，供恢复登录资料时参考。旧清单的 `Verified` 是创建时的文件复制校验结果，不代表旧数据库当前健康或文件如今仍齐全。
+- 策略见 `scripts/installed-backup-policy.json`。带 `ManagedBy: installed-backup-v1` 的新备份按种类各保留最近 **3** 份，新备份完成复制、校验和最终目录发布后才清理超额备份。在备份目录内创建 `.keep` 可固定保留；仍被其他备份引用的完整备份也额外保留。
+- 历史备份、无法识别或未验证的目录不自动删除。未完成复制的本次 `.partial` 目录会在失败时清理；清理失败会明确报错，备份轮转失败则报告 `Retention.Status: deferred`。清理拒绝越出项目和经过目录链接，避免删除实际账号数据。
+- 验证维护脚本：`npm run test:installed-backup`（与维护启动器一样使用 PowerShell 7，需要 `pwsh` 在 PATH 内）。测试只操作项目 `output/temp/` 内的临时程序和 SQLite 数据，不运行真实备份或清理历史目录。
 
 仓库保留源码、测试、维护脚本和技术文档。`output/`、`docs/.compare/`、诊断脚本生成的 `docs/*.results.json` 等报告、截图及本机工具记录不提交。历史文档中提到的原始报告属于本机运行产物，需要时通过对应脚本重新生成；测试使用的 fixture 和规则示例仍保留在仓库中。
 

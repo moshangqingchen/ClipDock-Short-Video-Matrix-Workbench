@@ -2,8 +2,9 @@ import { GlobalMetricsPage } from "@renderer/features/global/GlobalMetricsPage";
 import { GlobalAccountModalHost } from "@renderer/features/global/GlobalAccountModalHost";
 import { useGlobalAccounts, subscribeGlobalAccounts } from "@renderer/store/global-accounts";
 import { useEffect } from "react";
-import { ToastStack, cx } from "@renderer/components/ui";
-import { api } from "@renderer/lib/api";
+import { Button, ToastStack, cx } from "@renderer/components/ui";
+import { api, runtimeMode } from "@renderer/lib/api";
+import { Unplug } from "lucide-react";
 import { subscribeToMain, useAccounts, useSettings, useToasts, useUi } from "@renderer/store";
 import { NavRail } from "@renderer/features/layout/NavRail";
 import { AccountSidebar } from "@renderer/features/layout/AccountSidebar";
@@ -18,6 +19,8 @@ import { GlobalAccountsPage } from "@renderer/features/global/GlobalAccountsPage
 import { CreatorPlatformPage } from "@renderer/features/creator/CreatorPlatformPage";
 import { AddAccountModal } from "@renderer/features/accounts/AddAccountModal";
 import { NetworkStatus } from "@renderer/features/network/NetworkStatus";
+import { WorkspaceHeader } from "@renderer/features/layout/WorkspaceHeader";
+import { CommandPalette } from "@renderer/features/command/CommandPalette";
 import { startNetworkSubscription } from "@renderer/store/network";
 import layout from "@renderer/features/layout/layout.module.css";
 
@@ -125,6 +128,8 @@ function useShortcuts() {
       if (!mod) return;
       const { accounts } = useAccounts.getState();
       const ui = useUi.getState();
+      if (ui.overlayCount > 0 || ui.addAccountOpen || ui.searchOpen ||
+          (event.target instanceof HTMLElement && event.target.closest("input, textarea, select, [contenteditable='true']"))) return;
       if (/^[1-9]$/.test(event.key)) {
         if (ui.creatorMode === "global") {
           const account = useGlobalAccounts.getState().accounts[Number(event.key) - 1];
@@ -159,6 +164,17 @@ function useShortcuts() {
 }
 
 export default function App() {
+  if (runtimeMode === "unavailable") return <main className={layout.connectionFailure}>
+    <Unplug size={38} strokeWidth={1.4} />
+    <h1>桌面连接不可用</h1>
+    <p>未能连接本机服务，暂时无法读取账号与业务数据。</p>
+    <p>请尝试重新加载；如果仍未恢复，请关闭并重新启动工作台。</p>
+    <Button variant="primary" onClick={() => window.location.reload()}>重新加载工作台</Button>
+  </main>;
+  return <ConnectedApp />;
+}
+
+function ConnectedApp() {
   useEffect(() => startNetworkSubscription(), []);
   useTheme();
   useBootstrap();
@@ -172,18 +188,20 @@ export default function App() {
   const creatorMode = useUi((s) => s.creatorMode);
   const toasts = useToasts((s) => s.items);
   const dismiss = useToasts((s) => s.dismiss);
+  const showAccountSidebar = !sidebarHidden && ["creator", "workspace", "global", "metrics", "publish"].includes(route);
 
   return (
     <div
       className={cx(
         layout.shell,
         railCollapsed && layout.railCollapsed,
-        sidebarHidden && layout.sidebarHidden,
+        !showAccountSidebar && layout.sidebarHidden,
       )}
     >
       <NavRail />
-      {creatorMode === "global" ? <GlobalAccountSidebar /> : <AccountSidebar />}
+      {showAccountSidebar ? (creatorMode === "global" ? <GlobalAccountSidebar /> : <AccountSidebar />) : <div aria-hidden="true" />}
       <main className={layout.main}>
+        <WorkspaceHeader />
         <NetworkStatus />
         {route === "overview" ? (
           creatorMode === "global" ? (
@@ -202,6 +220,7 @@ export default function App() {
       </main>
       <AddAccountModal />
       <GlobalAccountModalHost />
+      <CommandPalette />
       <ToastStack items={toasts} onDismiss={dismiss} />
     </div>
   );

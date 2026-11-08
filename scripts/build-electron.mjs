@@ -2,6 +2,7 @@ import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
+import { isBuiltin } from "node:module";
 import { reviewedOperationBuildOptions } from "./reviewed-operation-build.mjs";
 import { buildChromeDock } from "./build-chrome-dock.mjs";
 
@@ -14,6 +15,7 @@ buildChromeDock(root, outDir);
 
 const shared = {
   bundle: true,
+  metafile: true,
   platform: "node",
   target: "node22",
   sourcemap: production ? false : "inline",
@@ -32,7 +34,7 @@ const shared = {
 // The main process is emitted as ESM (package.json "type": "module"). Electron
 // and Node built-ins stay external so the runtime binaries are used.
 const reviewedOperations = reviewedOperationBuildOptions(root);
-await build({
+const mainBundle = await build({
   ...shared,
   define: { ...shared.define, ...reviewedOperations.define },
   plugins: reviewedOperations.plugins,
@@ -50,10 +52,21 @@ await build({
 
 // Sandboxed preload scripts must be CommonJS. Only `electron` is external; the
 // bundle contains no Node built-ins because sandboxed preloads cannot use them.
-await build({
+const preloadBundle = await build({
   ...shared,
   entryPoints: [path.join(root, "src/preload/index.ts")],
   outfile: path.join(outDir, "preload.cjs"),
   format: "cjs",
   external: ["electron"],
 });
+
+// Production packages omit node_modules because these outputs contain their
+// dependencies. Refuse a future build that silently reintroduces an external one.
+for (const [name, result] of [["main", mainBundle], ["preload", preloadBundle]]) {
+  for (const output of Object.values(result.metafile.outputs)) {
+    for (const dependency of output.imports) {
+      if (dependency.external && dependency.path !== "electron" && !isBuiltin(dependency.path))
+        throw new Error(`${name} requires an unbundled runtime dependency: ${dependency.path}`);
+    }
+  }
+}

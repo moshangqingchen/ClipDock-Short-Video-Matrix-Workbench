@@ -33,7 +33,7 @@
   font-size: var(--text-md);
 }
 .button.primary {
-  background: var(--brand-600);
+  background: linear-gradient(120deg, var(--brand-500), var(--brand-600));
   color: #fff;
   box-shadow: 0 1px 2px rgba(15, 86, 245, 0.25);
 }
@@ -109,7 +109,7 @@
 
 /* ---------- Card ---------- */
 .card {
-  background: var(--bg-elev);
+  background: var(--bg-glass);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-sm);

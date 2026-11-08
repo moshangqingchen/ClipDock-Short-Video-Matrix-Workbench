@@ -23,6 +23,7 @@ import { AssetGrid, useAssets } from "@renderer/features/assets/AssetsPage";
 import { DRAFT_CHANGED, readPublishDraft, savePublishDraft, type PublishDraft } from "@renderer/lib/publish-drafts";
 import layout from "@renderer/features/layout/layout.module.css";
 import styles from "./publish.module.css";
+import { SectionIllustration } from "@renderer/components/ui/SectionIllustration";
 
 type PublishRecord = Omit<DomesticPublishRecord, "platformId"> & {
   platformId: PlatformId | GlobalPlatformId;
@@ -283,6 +284,7 @@ function PublishComposer({
         </div>
       </div>
 
+      <SectionIllustration title="准备好了，就让作品出发" description="选择账号、整理文案与素材，最后在平台官方页面确认发布。" scene="studio" />
       {accountId && <div role={draftState.error ? "alert" : "status"} className={styles.draftStatus}>
         <span>{draftState.error ?? (draftState.savedAt ? `草稿已自动保存 · ${formatDateTime(draftState.savedAt)}` : "编辑后自动保存到本机，重启可继续")}</span>
         {draftState.error && <Button size="sm" onClick={() => setDraftState(savePublishDraft(scope, accountId, draft))}>重试保存</Button>}

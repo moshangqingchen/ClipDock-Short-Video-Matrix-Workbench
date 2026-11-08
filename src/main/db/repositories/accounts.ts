@@ -86,6 +86,8 @@ export class AccountsRepository {
     if (confirmation != null && !homepageConfirmation) throw new Error("主页登录证据无效");
     const stored: AccountCheckInfo = {
       state: info.state, reason: info.reason, attemptedAt: info.attemptedAt,
+      ...(info.state === "unconfirmed" && info.retainedHomepage === true && homepageConfirmation
+        ? { retainedHomepage: true as const } : {}),
       ...(confirmation !== undefined ? { homepageConfirmation } : {}),
       ...(current.checkInfo?.creatorConfirmation !== undefined
         ? { creatorConfirmation: current.checkInfo.creatorConfirmation } : {}),
@@ -247,6 +249,8 @@ function readCheckInfo(value?: string | null): AccountCheckInfo | null {
       state: parsed.state,
       reason: parsed.reason,
       attemptedAt: parsed.attemptedAt,
+      ...(parsed.state === "unconfirmed" && parsed.retainedHomepage === true && readHomepageConfirmation(parsed.homepageConfirmation)
+        ? { retainedHomepage: true as const } : {}),
       ...(parsed.homepageConfirmation !== undefined
         ? { homepageConfirmation: readHomepageConfirmation(parsed.homepageConfirmation) } : {}),
       ...(parsed.creatorConfirmation !== undefined

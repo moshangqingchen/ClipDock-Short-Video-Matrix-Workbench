@@ -215,7 +215,15 @@ export class AccountService extends EventEmitter {
         ...(evidence.platformCode !== undefined ? { platformCode: evidence.platformCode } : {}),
       } });
     }
-    if (!page || page.loading || page.lastError || !isProfilePage(account.platformId, page) ||
+    // A current-document self-identity response is already conclusive while
+    // unrelated images/iframes keep Chromium's loading flag set. Waiting for
+    // did-stop-loading can lose this response when its 30-second lifetime ends.
+    // Only the observer's authenticated, reviewed response may bypass loading;
+    // errors, missing identity and logout observations still need a settled page.
+    const authenticatedWhileLoading = evidence.kind === "online" && Boolean(evidence.subject) &&
+      Boolean(evidence.endpoint) && evidence.httpStatus !== undefined &&
+      evidence.httpStatus >= 200 && evidence.httpStatus < 300;
+    if (!page || page.lastError || !isProfilePage(account.platformId, page, authenticatedWhileLoading) ||
         isHomepageContext(account.platformId, page.url) ||
         this.creatorEvidenceKeys.get(accountId) === evidence.key) return;
     // isProfilePage also permits Bilibili's consumer API context; creator authority
@@ -518,11 +526,12 @@ export class AccountService extends EventEmitter {
     return task;
   }
 
-  private recordCheck(accountId: string, state: AccountCheckInfo["state"], reason: string): Account {
+  private recordCheck(accountId: string, state: AccountCheckInfo["state"], reason: string, retainedHomepage?: true): Account {
     const account = this.options.store.accounts.updateCheckInfo(accountId, {
       state,
       reason,
       attemptedAt: new Date().toISOString(),
+      ...(retainedHomepage ? { retainedHomepage } : {}),
     });
     if (!account) throw new Error("账号不存在");
     this.emit("account-changed", account);
@@ -696,7 +705,7 @@ export class AccountService extends EventEmitter {
       if (result.unconfirmed) {
         if (homepageRequired && result.status === "unknown" && this.get(accountId).status !== "unknown")
           this.options.store.accounts.updateStatus(accountId, "unknown", result.message, { online: false, preserveCheckedAt: true });
-        return this.recordCheck(accountId, "unconfirmed", result.message);
+        return this.recordCheck(accountId, "unconfirmed", result.message, result.retainedHomepage);
       }
       if (result.status === "network_error") {
         return this.recordCheck(accountId, "network_error", result.message);
@@ -1131,8 +1140,8 @@ function isSettledCreatorLoginPage(platformId: PlatformId, page: ViewState | nul
   } catch { return false; }
 }
 
-function isProfilePage(platformId: PlatformId, state: ViewState): boolean {
-  if (state.loading || state.isLoginPage || !state.url || isLoginUrl(platformId, state.url) ||
+function isProfilePage(platformId: PlatformId, state: ViewState, allowAuthenticatedLoading = false): boolean {
+  if (state.loading && !allowAuthenticatedLoading || state.isLoginPage || state.isVerificationPage || !state.url || isLoginUrl(platformId, state.url) ||
     isVerificationUrl(platformId, state.url)) return false;
   try {
     const url = new URL(state.url);

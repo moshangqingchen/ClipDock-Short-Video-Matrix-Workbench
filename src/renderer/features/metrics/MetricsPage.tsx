@@ -45,6 +45,7 @@ import { WorkLink } from "./WorkLink";
 import { BusinessAnalyticsPanel } from "./BusinessAnalyticsPanel";
 import { METRIC_LABELS, RUN_LABELS, originLabel } from "./metric-presentation";
 import { useMetricResource } from "./use-metric-resource";
+import { SectionIllustration } from "@renderer/components/ui/SectionIllustration";
 
 type SortKey = MetricName | "dayFollowers";
 type Range = 7 | 30 | 90;
@@ -99,6 +100,7 @@ export function MetricsPage() {
         </div>
       </div>
 
+      <SectionIllustration title="每一点成长，都有迹可循" description="按平台查看真实观测与变化。未取得的数据留空，历史结果保留采集时间。" scene="studio" />
       {available.length === 0 ? (
         <EmptyState
           icon={BarChart3}

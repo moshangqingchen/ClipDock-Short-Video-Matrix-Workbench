@@ -1,6 +1,6 @@
 {
   "name": "short-video-matrix-workbench",
-  "version": "1.0.6-rc.12",
+  "version": "1.1.0-rc.4",
   "description": "短视频矩阵工作台 — 多平台多账号独立浏览器环境与数据观测",
   "author": "Short Video Matrix Workbench Team",
   "private": true,
@@ -16,6 +16,7 @@
     "lint": "eslint src",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",
     "test": "vitest run",
+    "test:installed-backup": "pwsh -NoProfile -NonInteractive -File scripts/installed-backup-policy.test.ps1 && node --test scripts/installed-program-database-backup.test.mjs",
     "test:watch": "vitest",
     "smoke:electron": "vite build && node scripts/build-electron.mjs && node scripts/electron-window-smoke.mjs",
     "start": "electron .",
@@ -69,7 +70,8 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
-      "package.json"
+      "package.json",
+      "!node_modules/**/*"
     ],
     "asar": true,
     "asarUnpack": [

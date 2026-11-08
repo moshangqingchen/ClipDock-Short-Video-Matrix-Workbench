@@ -293,4 +293,39 @@ describe("transient renderer network state", () => {
     expect(useNetwork.getState().snapshot.switching?.state).not.toBe("domestic");
     expect(useNetwork.getState().snapshot.accounts).toEqual([]);
   });
+
+  it("shares overlapping manual refreshes and keeps busy until startup and refresh both finish", async () => {
+    const initial = deferred<NetworkSnapshot>();
+    const refresh = deferred<NetworkSnapshot>();
+    transport.snapshot.mockReturnValue(initial.promise);
+    transport.refresh.mockReturnValue(refresh.promise);
+    stop = startNetworkSubscription();
+    const first = useNetwork.getState().refresh();
+    const second = useNetwork.getState().refresh();
+    expect(transport.refresh).toHaveBeenCalledOnce();
+    initial.resolve(snapshot("main", 1));
+    await initial.promise;
+    expect(useNetwork.getState().refreshing).toBe(true);
+    refresh.resolve(snapshot("main", 2));
+    await Promise.all([first, second]);
+    expect(useNetwork.getState()).toMatchObject({ refreshing: false, error: null });
+    expect(useNetwork.getState().snapshot.sequence).toBe(2);
+    await useNetwork.getState().refresh();
+    expect(transport.refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not surface an old startup failure while a manual refresh is pending", async () => {
+    const initial = deferred<NetworkSnapshot>();
+    const refresh = deferred<NetworkSnapshot>();
+    transport.snapshot.mockReturnValue(initial.promise);
+    transport.refresh.mockReturnValue(refresh.promise);
+    stop = startNetworkSubscription();
+    const pending = useNetwork.getState().refresh();
+    initial.reject(new Error("startup failed"));
+    await initial.promise.catch(() => undefined);
+    expect(useNetwork.getState()).toMatchObject({ refreshing: true, error: null });
+    refresh.resolve(snapshot("main", 2));
+    await pending;
+    expect(useNetwork.getState()).toMatchObject({ refreshing: false, error: null });
+  });
 });

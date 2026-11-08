@@ -20,8 +20,7 @@ export function networkDisplay(snapshot: NetworkSnapshot, startupPending = false
     snapshot.enforcement === "strict" && switching
       ? switching.state
       : "checking";
-  // Keep the actual state checking: platform badges and request guards must not
-  // interpret the default domestic label as a successful proxy observation.
+  // Until detection completes, neither the label nor permissions imply a usable route.
   if (
     startupPending &&
     state === "checking" &&
@@ -31,7 +30,7 @@ export function networkDisplay(snapshot: NetworkSnapshot, startupPending = false
   ) {
     return {
       state,
-      label: "国内模式",
+      label: "检查中",
       reason: "后台检测网络状态，确认后自动启用平台",
     };
   }

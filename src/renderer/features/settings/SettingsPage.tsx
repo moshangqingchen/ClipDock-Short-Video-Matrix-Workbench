@@ -29,7 +29,9 @@ export function SettingsPage() {
   }, []);
 
   const set = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) =>
-    void patch({ [key]: value } as Partial<AppSettings>);
+    void patch({ [key]: value } as Partial<AppSettings>).catch(() => {
+      useToasts.getState().push({ kind: "error", title: "设置保存失败，请重试" });
+    });
 
   return (
     <div className={layout.page}>

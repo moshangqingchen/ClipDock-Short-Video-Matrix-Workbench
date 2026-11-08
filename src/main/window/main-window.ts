@@ -3,6 +3,7 @@ import { appIconPng } from "./app-icon";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureShellNetworkGuard } from "@main/network/shell-network-guard";
+import { desktopShellUrl } from "@shared/renderer-runtime";
 import {
   clampWindowState,
   defaultWindowState,
@@ -141,7 +142,7 @@ export function createMainWindow(userDataPath: string): MainWindow {
 
   const loadShell = async () => {
     const dev = resolveDevUrl();
-    if (dev) await wc.loadURL(dev);
+    if (dev) await wc.loadURL(desktopShellUrl(dev));
     else await wc.loadFile(resolveShellEntry());
   };
 

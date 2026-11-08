@@ -60,6 +60,10 @@ const paths: Partial<Record<PlatformId, { host: string; paths: string[] }>> = {
   },
 };
 
+// The consumer site's own profile is distinct from /profile/other/, which takes
+// sec_user_id and can describe any video author. Observe only the self route.
+const DOUYIN_HOMEPAGE_SELF_PATH = "/aweme/v1/web/user/profile/self/";
+
 export function isIdentityEndpoint(platform: PlatformId, url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -70,9 +74,9 @@ export function isIdentityEndpoint(platform: PlatformId, url: string): boolean {
       !parsed.username &&
       !parsed.password &&
       !parsed.port &&
-      parsed.hostname === target.host &&
-      target.paths.includes(parsed.pathname) &&
-      ![...parsed.searchParams.keys()].some(key => /^(?:mid|uid|user_?id|sec_uid|target_?id|author_?id|app_?id)$/i.test(key)),
+      (parsed.hostname === target.host && target.paths.includes(parsed.pathname) ||
+        platform === "douyin" && parsed.hostname === "www.douyin.com" && parsed.pathname === DOUYIN_HOMEPAGE_SELF_PATH) &&
+      ![...parsed.searchParams.keys()].some(key => /^(?:mid|uid|user_?id|sec_?uid|sec_?user_?id|target_?(?:id|uid|user_?id)|author_?id|app_?id)$/i.test(key)),
     );
   } catch {
     return false;
@@ -122,9 +126,10 @@ function avatarSource(user: Record<string, unknown>, platform: PlatformId): stri
 function authenticated(user: Record<string, unknown>, subject: string, platform: PlatformId): IdentityVerdict {
   const nickname = user.nickname ?? user.nickName ?? user.nick_name ?? user.uname ?? user.name ?? user.userName ?? user.app_name ?? user.author_name;
   const handle = platform === "bilibili" ? subject : user.uniqId ?? user.kwaiId ?? user.userKwaiId ?? user.unique_id ?? user.short_id ?? user.redId ?? user.red_id;
-  const followers = user.fansCount ?? user.fans_count ?? user.followerCount ?? user.fansCnt;
-  const following = user.followCnt ?? user.followCount;
-  const likes = user.likeCnt ?? user.likeCount;
+  const followers = user.fansCount ?? user.fans_count ?? user.followerCount ?? user.fansCnt ??
+    (platform === "douyin" ? user.follower_count ?? user.mplatform_followers_count : undefined);
+  const following = user.followCnt ?? user.followCount ?? (platform === "douyin" ? user.following_count : undefined);
+  const likes = user.likeCnt ?? user.likeCount ?? (platform === "douyin" ? user.total_favorited : undefined);
   const avatarUrl = avatarSource(user, platform);
   return {
     kind: "online",
@@ -176,7 +181,12 @@ export function parseIdentityResponse(
       return authenticated(data, subject, platform);
   }
   if (platform === "douyin" && (root.status_code === 0 || root.status_code === "0")) {
-    for (const user of [record(root.user), record(data.user), record(root.user_info)]) {
+    const homepageSelf = new URL(url).hostname === "www.douyin.com";
+    const users = homepageSelf ? [record(root.user)] : [record(root.user), record(data.user), record(root.user_info)];
+    for (const user of users) {
+      // The official consumer client requires user.uid on a successful self
+      // response; do not import a cached or guest nickname without that ID.
+      if (homepageSelf && !/^[1-9]\d*$/.test(identity(user, ["uid"]) ?? "")) continue;
       const subject = identity(user, ["sec_uid", "uid", "user_id"]);
       if (subject) return authenticated(user, subject, platform);
     }

@@ -17,6 +17,9 @@ interface Subscription {
   instanceId: string;
   sequence: number;
   retiredInstances: Set<string>;
+  requests: number;
+  latestRequest: number;
+  refreshFlight?: Promise<void>;
   expiryTimer?: ReturnType<typeof setTimeout>;
   stop(): void;
 }
@@ -136,29 +139,48 @@ function receiveSnapshot(current: Subscription, snapshot: NetworkSnapshot, reque
   }
 }
 
-async function requestSnapshot(method: "snapshot" | "refresh"): Promise<void> {
+function requestSnapshot(method: "snapshot" | "refresh"): Promise<void> {
   const current = subscription;
-  if (!current?.active) return;
+  if (!current?.active) return Promise.resolve();
+  // The status bar and network panel share one refresh instead of racing IPC calls.
+  if (method === "refresh" && current.refreshFlight) return current.refreshFlight;
   const revision = current.revision;
+  const request = ++current.latestRequest;
+  current.requests++;
   useNetwork.setState({ refreshing: true, error: null });
-  try {
-    const snapshot = await api.network[method]();
-    receiveSnapshot(current, snapshot, revision);
-  } catch {
-    if (current.active && subscription === current && current.revision === revision) {
-      if (current.expiryTimer) clearTimeout(current.expiryTimer);
-      useNetwork.setState({
-        snapshot:
-          useNetwork.getState().snapshot.policy !== undefined
-            ? expiredSnapshot(useNetwork.getState().snapshot)
-            : checkingNetworkSnapshot(),
-        error: "无法获取主进程网络状态，请重试",
-        startupPending: false,
-      });
+  const task = (async () => {
+    try {
+      const snapshot = await api.network[method]();
+      receiveSnapshot(current, snapshot, revision);
+    } catch {
+      if (
+        current.active && subscription === current &&
+        current.revision === revision && current.latestRequest === request
+      ) {
+        if (current.expiryTimer) clearTimeout(current.expiryTimer);
+        useNetwork.setState({
+          snapshot:
+            useNetwork.getState().snapshot.policy !== undefined
+              ? expiredSnapshot(useNetwork.getState().snapshot)
+              : checkingNetworkSnapshot(),
+          error: "无法获取主进程网络状态，请重试",
+          startupPending: false,
+        });
+      }
+    } finally {
+      current.requests--;
+      if (current.active && subscription === current)
+        useNetwork.setState({ refreshing: current.requests > 0 });
     }
-  } finally {
-    if (current.active && subscription === current) useNetwork.setState({ refreshing: false });
+  })();
+  if (method === "refresh") {
+    const flight = task.finally(() => {
+      if (current.refreshFlight === flight) current.refreshFlight = undefined;
+    });
+    current.refreshFlight = flight;
+    return flight;
   }
+  return task;
 }
 
 /** Subscribe before loading, so a late initial response cannot overwrite a push. */
@@ -176,6 +198,8 @@ export function startNetworkSubscription(): () => void {
     instanceId: "",
     sequence: -1,
     retiredInstances: new Set(),
+    requests: 0,
+    latestRequest: 0,
     stop: () => undefined,
   };
   subscription = current;

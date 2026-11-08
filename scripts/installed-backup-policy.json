@@ -1,0 +1,14 @@
+{
+  "managedBy": "installed-backup-v1",
+  "keepPerKind": 3,
+  "backupDirectory": ".local-data/历史资料/安装程序备份",
+  "excludedUserDataDirectories": [
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "GrShaderCache",
+    "ShaderCache"
+  ]
+}

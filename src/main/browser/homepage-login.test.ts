@@ -447,6 +447,43 @@ describe("homepage current-account login detection", () => {
       .toBe("unconfirmed");
   });
 
+  const douyinLiveHeader = '<header><a href="/user/self"><img src="https://p3-pc-sign.douyinpic.com/aweme/100x100/aweme-avatar/current-asset.jpeg?x-signature=header"></a></header>';
+  const douyinLiveProfile = '<main><div><div><img src="https://p3-pc-sign.douyinpic.com/aweme-avatar/current-asset~tplv-300x300.webp?x-signature=profile"></div><div data-e2e="user-info"><div><h1>心愿_AIGC</h1></div></div></div></main>';
+  it("reads Jingxuan's live own-profile nickname without the removed initial account stores", () => {
+    expect(read("douyin", douyinLiveHeader + douyinLiveProfile, {}, { url: "https://www.douyin.com/user/self?from_nav=1" }))
+      .toMatchObject({ kind: "online", displayName: "心愿_AIGC",
+        avatarUrl: "https://p3-pc-sign.douyinpic.com/aweme/100x100/aweme-avatar/current-asset.jpeg?x-signature=header" });
+  });
+  it("replaces a stale initial nickname only when the live own-profile avatar matches the signed-in header", () => {
+    const state = { __INITIAL_STATE__: { userStore: { isLogin: true, userInfo: { uid: "self", nickname: "陌上轻尘",
+      avatar_thumb: { url_list: ["https://p3.douyinpic.com/old.jpg"] } } } } };
+    expect(read("douyin", douyinLiveHeader + douyinLiveProfile, state, { url: "https://www.douyin.com/user/self" }).displayName)
+      .toBe("心愿_AIGC");
+    expect(read("douyin", douyinLiveHeader + douyinLiveProfile.replace('current-asset~', 'another-asset~'), state,
+      { url: "https://www.douyin.com/user/self" })).not.toHaveProperty("displayName");
+  });
+  it.each([
+    ["public profile", douyinLiveHeader + douyinLiveProfile, "https://www.douyin.com/user/someone"],
+    ["recommendations", douyinLiveHeader + douyinLiveProfile, "https://www.douyin.com/jingxuan"],
+    ["no signed-in header", douyinLiveProfile, "https://www.douyin.com/user/self"],
+    ["foreign avatar", douyinLiveHeader + douyinLiveProfile.replace('p3-pc-sign.douyinpic.com/aweme-avatar', 'example.test/aweme-avatar'), "https://www.douyin.com/user/self"],
+    ["hidden profile", douyinLiveHeader + douyinLiveProfile.replace('<main>', '<main hidden>'), "https://www.douyin.com/user/self"],
+    ["hidden title", douyinLiveHeader + douyinLiveProfile.replace('<h1>', '<h1 hidden>'), "https://www.douyin.com/user/self"],
+    ["ambiguous profile", douyinLiveHeader + douyinLiveProfile + douyinLiveProfile, "https://www.douyin.com/user/self"],
+    ["ambiguous title", douyinLiveHeader + douyinLiveProfile.replace('</h1>', '</h1><h1>另一个账号</h1>'), "https://www.douyin.com/user/self"],
+    ["article author", douyinLiveHeader + '<article>' + douyinLiveProfile + '</article>', "https://www.douyin.com/user/self"],
+    ["video author", douyinLiveHeader + '<div data-e2e="feed-video">' + douyinLiveProfile + '</div>', "https://www.douyin.com/user/self"],
+    ["guest title", douyinLiveHeader + douyinLiveProfile.replace('心愿_AIGC', '游客'), "https://www.douyin.com/user/self"],
+  ])("does not import Jingxuan's %s as the current nickname", (_label, body, url) => {
+    expect(read("douyin", body, {}, { url })).not.toHaveProperty("displayName");
+  });
+  it("waits for Jingxuan's own-profile hydration and conflicting login controls", () => {
+    const body = douyinLiveHeader + douyinLiveProfile;
+    expect(read("douyin", body, {}, { url: "https://www.douyin.com/user/self", loading: true })).not.toHaveProperty("displayName");
+    expect(read("douyin", body + '<header><button data-e2e="login-button">登录</button></header>', {},
+      { url: "https://www.douyin.com/user/self" })).not.toHaveProperty("displayName");
+  });
+
   it.each([
     [
       "douyin",

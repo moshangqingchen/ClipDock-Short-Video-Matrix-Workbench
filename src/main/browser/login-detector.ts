@@ -58,6 +58,8 @@ export interface DetectionResult {
   sessionExpiresAt?: string | null;
   /** Main-process only: the response did not confirm authentication; do not persist status or times. */
   unconfirmed?: true;
+  /** The view is outside the homepage; its prior explicit verdict remains unchanged. */
+  retainedHomepage?: true;
   evidenceKey?: string;
   source?: "homepage";
   /** Main-process media input only; never persisted as an account profile field. */
@@ -248,7 +250,7 @@ export async function detectLoginState(input: DetectionInput): Promise<Detection
         : homepage?.reason || "等待主页加载并确认登录状态" };
   }
   if (confirmedStatus)
-    return { ...base, status: confirmedStatus, unconfirmed: true,
+    return { ...base, status: confirmedStatus, unconfirmed: true, retainedHomepage: true,
       message: "保留上次主页登录结论，等待主页自动复核；管理后台不用于确认主页登录" };
   return { ...base, status: input.previousStatus === "offline" ? "offline" : "unknown", unconfirmed: true,
     message: "主页登录尚未确认，等待主页自动复核；管理后台登录不能替代主页登录" };

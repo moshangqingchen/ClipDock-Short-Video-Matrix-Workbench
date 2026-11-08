@@ -6,6 +6,7 @@ import {
   PanelLeftOpen,
   Send,
   Settings,
+  Sparkles,
   Users,
 } from "lucide-react";
 import { cx } from "@renderer/components/ui";
@@ -48,6 +49,7 @@ export function NavRail() {
           <span>MATRIX OPS</span>
         </div>
       </div>
+      <div className={styles.navCaption}>CREATOR WORKSPACE</div>
       <div className={styles.navList}>
         {ITEMS.map((item) => (
           <button
@@ -62,6 +64,7 @@ export function NavRail() {
             onClick={() => setRoute(item.route)}
             title={item.label}
             aria-label={item.label}
+            aria-current={route === item.route || (item.route === "creator" && (route === "workspace" || route === "global")) ? "page" : undefined}
           >
             <item.icon size={18} strokeWidth={2} />
             <span>{item.label}</span>
@@ -72,6 +75,11 @@ export function NavRail() {
         ))}
       </div>
       <div className={styles.railSpacer} />
+      <div className={styles.railNote}>
+        <Sparkles size={22} strokeWidth={1.4} />
+        <strong>让灵感，慢慢发光</strong>
+        <span>专注创作，余下的交给工作台。</span>
+      </div>
       <div className={styles.railFoot}>
         <button
           type="button"

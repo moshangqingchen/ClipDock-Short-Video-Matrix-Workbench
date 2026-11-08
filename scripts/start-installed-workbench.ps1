@@ -83,7 +83,15 @@ $desktop = $shellWindows.FindWindowSW(0, 0, 8, [ref]$desktopHandle, 1) # SWC_DES
 if (-not $desktop -or -not $desktopHandle) { throw 'The existing Windows desktop Explorer could not be found.' }
 $desktopApplication = $desktop.Document.Application
 
-$resultPath = Join-Path ([IO.Path]::GetTempPath()) ('clipdock-independent-' + [guid]::NewGuid().ToString('N') + '.json')
+$projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$helperTempRoot = Join-Path $projectRoot 'output\temp\installed-launch'
+foreach ($directory in @($projectRoot, (Join-Path $projectRoot 'output'), (Join-Path $projectRoot 'output\temp'), $helperTempRoot)) {
+  [IO.Directory]::CreateDirectory($directory) | Out-Null
+  if ((Get-Item -LiteralPath $directory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    throw 'The launcher output directory must remain inside the project without directory links.'
+  }
+}
+$resultPath = Join-Path $helperTempRoot ('clipdock-independent-' + [guid]::NewGuid().ToString('N') + '.json')
 $payload = @{
   ExecutablePath = $ExecutablePath
   ResultPath = $resultPath
@@ -92,6 +100,7 @@ $payload = @{
   ScriptPath = $ScriptPath
   ScriptParameters = $ScriptParameters
   InspectPath = $InspectPath
+  HelperTempRoot = $helperTempRoot
 } | ConvertTo-Json -Compress -Depth 10
 $encodedPayload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
 
@@ -101,6 +110,9 @@ $encodedPayload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payl
 $helper = @'
 $ErrorActionPreference = 'Stop'
 $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__')) | ConvertFrom-Json
+foreach ($name in @('TEMP', 'TMP', 'TMPDIR')) {
+  [Environment]::SetEnvironmentVariable($name, $payload.HelperTempRoot, 'Process')
+}
 $report = [ordered]@{
   Success = $false; Probe = $payload.Probe; Mode = $payload.Mode; HelperProcessId = $PID
   HelperPowerShellVersion = $PSVersionTable.PSVersion.ToString()
@@ -227,7 +239,7 @@ public static class ClipDockLaunchJob {
 $helper = $helper.Replace('__PAYLOAD__', $encodedPayload)
 $encodedHelper = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($helper))
 $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + $encodedHelper
-$desktopApplication.ShellExecute($PowerShellPath, $arguments, [IO.Path]::GetTempPath(), 'open', 0)
+$desktopApplication.ShellExecute($PowerShellPath, $arguments, $projectRoot, 'open', 0)
 
 $deadline = [DateTime]::UtcNow.AddSeconds($WaitSeconds)
 while (-not (Test-Path -LiteralPath $resultPath)) {

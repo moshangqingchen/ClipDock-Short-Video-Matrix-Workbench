@@ -1,6 +1,6 @@
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { accountUpdateSchema } from "@shared/ipc";
-import type { Account, LocalMediaUrl, OverviewView, PlatformSummaryView, Work } from "@shared/types";
+import type { Account, AccountCheckInfo, LocalMediaUrl, OverviewView, PlatformSummaryView, Work } from "@shared/types";
 import { createMediaProjection, isLocalMediaUrl } from "./media-projection";
 
 const cacheUrl = "sv-asset://remote/86cd4ebf-007c-4b24-8b0a-6b84097f304a" as const;
@@ -83,6 +83,64 @@ describe("renderer media DTO projection", () => {
     const projected = createMediaProjection({enforcement: "strict"}).projectAccount({...account, checkInfo});
     expect(projected.checkInfo).toEqual({state: "paused", reason: "国内网络暂停", attemptedAt: checkInfo.attemptedAt});
     expect(JSON.stringify(projected)).not.toContain("must-not-export");
+  });
+  it.each(["strict", "observe"] as const)("preserves independent login confirmations through %s IPC projection without leaking identity payloads", enforcement => {
+    const homepageConfirmation = { kind: "online" as const, observedAt: Date.now() - 2000, token: "must-not-export-home" };
+    const creatorConfirmation = { kind: "offline" as const, observedAt: Date.now() - 1000, rawResponse: "must-not-export-creator" };
+    const checkInfo = { state: "unconfirmed" as const, reason: "管理页保留主页结论", attemptedAt: "2026-10-22T00:00:00Z",
+      retainedHomepage: true as const, homepageConfirmation, creatorConfirmation, session: "must-not-export-session" };
+    const projected = createMediaProjection({ enforcement }).projectAccounts([{ ...account, checkInfo }])[0];
+    expect(projected.checkInfo).toEqual({ state: checkInfo.state, reason: checkInfo.reason, attemptedAt: checkInfo.attemptedAt,
+      retainedHomepage: true, homepageConfirmation: { kind: "online", observedAt: homepageConfirmation.observedAt },
+      creatorConfirmation: { kind: "offline", observedAt: creatorConfirmation.observedAt } });
+    expect(projected.checkInfo?.homepageConfirmation).not.toBe(homepageConfirmation);
+    expect(projected.checkInfo?.creatorConfirmation).not.toBe(creatorConfirmation);
+    expect(JSON.stringify(projected.checkInfo)).not.toContain("must-not-export");
+    expect(homepageConfirmation.token).toBe("must-not-export-home");
+  });
+  it("projects a creator login even when the independent homepage has not been confirmed", () => {
+    const creatorConfirmation = { kind: "online" as const, observedAt: Date.now() - 1000 };
+    const checkInfo = { state: "unconfirmed" as const, reason: "主页尚未确认", attemptedAt: "2026-10-22T00:00:00Z",
+      retainedHomepage: true as const, creatorConfirmation };
+    const projected = createMediaProjection({ enforcement: "strict" }).projectAccount({ ...account, checkInfo }).checkInfo;
+    expect(projected).toEqual({ state: checkInfo.state, reason: checkInfo.reason, attemptedAt: checkInfo.attemptedAt, creatorConfirmation });
+    expect(projected).not.toHaveProperty("homepageConfirmation");
+    expect(projected).not.toHaveProperty("retainedHomepage");
+  });
+  it("preserves explicit revocation nulls and never marks absent confirmations as retained", () => {
+    const projection = createMediaProjection({ enforcement: "strict" });
+    const checkInfo = { state: "unconfirmed" as const, reason: "登录环境已重置", attemptedAt: "2026-10-22T00:00:00Z",
+      retainedHomepage: true as const, homepageConfirmation: null, creatorConfirmation: null };
+    expect(projection.projectAccount({ ...account, checkInfo }).checkInfo).toEqual({
+      state: checkInfo.state, reason: checkInfo.reason, attemptedAt: checkInfo.attemptedAt,
+      homepageConfirmation: null, creatorConfirmation: null,
+    });
+    for (const absent of [undefined, null])
+      expect(projection.projectAccount({ ...account, checkInfo: absent }).checkInfo).toBe(absent);
+  });
+  it.each([
+    { kind: "unknown", observedAt: 1000 }, { kind: "online", observedAt: "1000" },
+    { kind: "offline", observedAt: -1 }, { kind: "online", observedAt: NaN },
+    { kind: "online", observedAt: Number.MAX_SAFE_INTEGER }, { kind: "online", observedAt: 1.5 },
+    [], "must-not-export",
+  ])("omits malformed confirmations and their retained marker: %j", invalid => {
+    const checkInfo = { state: "unconfirmed", reason: "检查", attemptedAt: "2026-10-22T00:00:00Z",
+      retainedHomepage: true, homepageConfirmation: invalid, creatorConfirmation: invalid } as unknown as AccountCheckInfo;
+    expect(createMediaProjection({ enforcement: "strict" }).projectAccount({ ...account, checkInfo }).checkInfo)
+      .toEqual({ state: checkInfo.state, reason: checkInfo.reason, attemptedAt: checkInfo.attemptedAt });
+  });
+  it.each(["checking", "confirmed", "network_error", "paused"] as const)("does not retain the homepage marker for %s checks", state => {
+    const homepageConfirmation = { kind: "offline" as const, observedAt: Date.now() - 1000 };
+    const checkInfo = { state, reason: "检查", attemptedAt: "2026-10-22T00:00:00Z", homepageConfirmation, retainedHomepage: true as const };
+    const projected = createMediaProjection({ enforcement: "strict" }).projectAccount({ ...account, checkInfo }).checkInfo;
+    expect(projected?.homepageConfirmation).toEqual(homepageConfirmation);
+    expect(projected).not.toHaveProperty("retainedHomepage");
+  });
+  it.each(["true", 1, false, null])("does not coerce a non-true retained marker: %j", retainedHomepage => {
+    const checkInfo = { state: "unconfirmed", reason: "检查", attemptedAt: "2026-10-22T00:00:00Z",
+      homepageConfirmation: { kind: "online", observedAt: Date.now() - 1000 }, retainedHomepage } as unknown as AccountCheckInfo;
+    expect(createMediaProjection({ enforcement: "strict" }).projectAccount({ ...account, checkInfo }).checkInfo)
+      .not.toHaveProperty("retainedHomepage");
   });
   it("strict mode defaults to null and does not trust either a remote URL or an old DB cache reference", () => {
     const projection = createMediaProjection({ enforcement: "strict" });

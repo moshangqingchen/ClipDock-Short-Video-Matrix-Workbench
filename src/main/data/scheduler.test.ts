@@ -367,6 +367,28 @@ describe("CollectScheduler network queue", () => {
     expect(store.metrics.listWorks(s.account.id, 100)).toHaveLength(55);
     expect(store.collectJobs.get(job.id)).toMatchObject({ state: "done", progress: { worksSeen: 55, complete: true } });
   });
+  it("keeps a terminal history page incomplete when overlap hides missing works", async () => {
+    allowed = true;
+    const s = setup();
+    let page = 0;
+    s.collect.mockImplementation(async () => {
+      const current = ++page;
+      return { ...s.payload, profile: null, metrics: [],
+        works: (current === 1 ? ["one", "two"] : ["two", "three"])
+          .map((id) => makeWork(s.account, id, { likes: 0 }, new Date().toISOString())),
+        page: { nextPage: current + 1, nextCursor: "", hasMore: current === 1, total: 4 },
+      };
+    });
+    const job = scheduler.enqueue(s.account.id, "manual", "history");
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(s.collect).toHaveBeenCalledTimes(2);
+    expect(store.metrics.listWorks(s.account.id)).toHaveLength(3);
+    expect(store.collectJobs.get(job.id)).toMatchObject({ state: "failed", progress: {
+      complete: false, worksSeen: 3, total: 4, page: 2,
+      reason: expect.stringContaining("去重后作品数未达到声明总数"),
+    } });
+    expect(store.metrics.lastAttemptedRun(s.account.id)?.status).toBe("partial");
+  });
   it("preserves platform Retry-After after cancelling the throttled task", async () => {
     allowed = true;
     const s = setup();

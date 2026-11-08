@@ -25,8 +25,10 @@ export function registerNetworkHandlers(
     return next;
   });
   ipc.handle(IPC.networkRefresh, async () => {
-    const [snapshot] = await Promise.all([observer.refresh(), refreshSelectedSource()]);
-    return project(snapshot);
+    await Promise.all([observer.refresh(), refreshSelectedSource()]);
+    // Source inspection may invalidate or replace the observation while refresh awaits it.
+    // Only project the current snapshot; giving an old sample a new sequence masks that change.
+    return project(observer.snapshot());
   });
   ipc.handle(IPC.networkDirectRules, () => observer.directRules());
 }

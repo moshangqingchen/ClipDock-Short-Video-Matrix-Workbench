@@ -86,4 +86,15 @@ describe("six-platform pagination and missing-field semantics", () => {
     recordWorksPage(ctx, { data: { total: 31 } }, [], "page");
     expect(ctx.pageResult?.hasMore).toBe(false);
   });
+  it.each([
+    { has_more: false },
+    { has_more: 0 },
+    { pcursor: "no_more" },
+  ])("keeps a nonempty terminal page incomplete when the declared total has not been read: %j", (end) => {
+    const { ctx } = setup("kuaishou", {});
+    ctx.progress!.worksSeen = 30;
+    recordWorksPage(ctx, { data: { total: 35 }, ...end }, [{}, {}], "cursor", ["pcursor"]);
+    expect(ctx.pageResult).toMatchObject({ hasMore: null, receivedCount: 2, total: 35, nextPage: 7 });
+    expect(ctx.pageResult?.reason).toContain("未达到声明总数");
+  });
 });

@@ -24,6 +24,7 @@ import { api, hasBridge } from "@renderer/lib/api";
 import { useToasts, useUi } from "@renderer/store";
 import layout from "@renderer/features/layout/layout.module.css";
 import styles from "./assets.module.css";
+import { SectionIllustration } from "@renderer/components/ui/SectionIllustration";
 
 export interface AssetsPageProps {
   selectable?: boolean;
@@ -85,7 +86,7 @@ export function AssetsPage() {
         <div>
           <span className={layout.eyebrow}>LIBRARY</span>
           <h1>素材库</h1>
-          <p>视频与图片保留在本机原位置,这里只记录引用、哈希与缩略图,用于发布助手快速选择。</p>
+          <p>收藏灵感，整理素材，让下一次创作轻松开始。</p>
         </div>
         <div className={layout.pageActions}>
           <Button variant="primary" icon={Plus} loading={importing} onClick={doImport}>
@@ -96,6 +97,7 @@ export function AssetsPage() {
           </Button>
         </div>
       </div>
+      <SectionIllustration title="给灵感，一个小小的栖息地" description="视频、图片与音频保留在原位置；选好素材，就可以前往发布助手。" />
       {error && <div role="alert" className={styles.notice}>
         <span>素材读取失败。{assets ? "已保留上次列表。" : "请重试读取。"}</span>
         <Button size="sm" loading={loading} onClick={reload}>重试读取素材</Button>

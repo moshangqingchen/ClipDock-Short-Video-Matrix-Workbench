@@ -24,10 +24,10 @@
   --sp-10: 40px;
 
   /* radii */
-  --r-sm: 6px;
-  --r-md: 10px;
-  --r-lg: 14px;
-  --r-xl: 20px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 18px;
+  --r-xl: 24px;
   --r-full: 999px;
 
   /* motion */
@@ -37,23 +37,23 @@
   --dur-slow: 320ms;
 
   /* layout */
-  --rail-w: 200px;
+  --rail-w: 208px;
   --rail-w-collapsed: 64px;
   --sidebar-w: 264px;
   --topbar-h: 96px;
   --drawer-w: 380px;
 
   /* brand */
-  --brand-50: #eef6ff;
-  --brand-100: #d9eaff;
-  --brand-200: #b8d8ff;
-  --brand-300: #86bdff;
-  --brand-400: #4d99ff;
-  --brand-500: #2673ff;
-  --brand-600: #0f56f5;
-  --brand-700: #0b43cf;
-  --brand-800: #0f3aa7;
-  --brand-900: #123483;
+  --brand-50: #f1f3ff;
+  --brand-100: #e6eaff;
+  --brand-200: #cdd5ff;
+  --brand-300: #adbaff;
+  --brand-400: #8a9af1;
+  --brand-500: #7183df;
+  --brand-600: #596dcb;
+  --brand-700: #485bb5;
+  --brand-800: #384b99;
+  --brand-900: #2d3d7a;
 
   --success: #17a34a;
   --success-soft: rgba(23, 163, 74, 0.14);
@@ -69,25 +69,26 @@
 
 :root,
 :root[data-theme="light"] {
-  --bg: #f4f6fa;
+  --bg: #f0f3fc;
   --bg-elev: #ffffff;
-  --bg-sunken: #eceff5;
-  --bg-hover: rgba(15, 23, 42, 0.045);
-  --bg-active: rgba(38, 115, 255, 0.1);
-  --fg: #0f172a;
-  --fg-muted: #5b6577;
-  --fg-subtle: #8b95a7;
+  --bg-glass: rgba(255, 255, 255, 0.78);
+  --bg-sunken: #edf0fa;
+  --bg-hover: rgba(91, 109, 175, 0.065);
+  --bg-active: rgba(113, 131, 223, 0.12);
+  --fg: #2c3859;
+  --fg-muted: #63718e;
+  --fg-subtle: #78849e;
   --fg-inverse: #ffffff;
-  --line: rgba(15, 23, 42, 0.08);
-  --line-strong: rgba(15, 23, 42, 0.14);
-  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 1px rgba(15, 23, 42, 0.04);
-  --shadow-md: 0 6px 18px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.05);
+  --line: rgba(119, 137, 189, 0.14);
+  --line-strong: rgba(105, 124, 181, 0.26);
+  --shadow-sm: 0 4px 20px rgba(87, 111, 172, 0.045);
+  --shadow-md: 0 8px 28px rgba(87, 111, 172, 0.11);
   --shadow-lg: 0 20px 50px rgba(15, 23, 42, 0.16), 0 6px 16px rgba(15, 23, 42, 0.08);
-  --rail-bg: #0f1420;
-  --rail-fg: #aab4c5;
+  --rail-bg: #2f3e69;
+  --rail-fg: #c5ceea;
   --rail-fg-active: #ffffff;
   --rail-hover: rgba(255, 255, 255, 0.06);
-  --rail-active: rgba(38, 115, 255, 0.22);
+  --rail-active: rgba(155, 176, 255, 0.23);
   --rail-line: rgba(255, 255, 255, 0.08);
   --chart-grid: rgba(15, 23, 42, 0.06);
   --scrollbar: rgba(15, 23, 42, 0.18);
@@ -97,6 +98,7 @@
   color-scheme: dark;
   --bg: #0b0f17;
   --bg-elev: #121826;
+  --bg-glass: rgba(23, 31, 50, 0.86);
   --bg-sunken: #0e131e;
   --bg-hover: rgba(255, 255, 255, 0.05);
   --bg-active: rgba(77, 153, 255, 0.16);

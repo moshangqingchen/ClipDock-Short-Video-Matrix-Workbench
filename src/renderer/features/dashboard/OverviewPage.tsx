@@ -36,6 +36,8 @@ import { CollectQueue } from "@renderer/features/metrics/CollectQueue";
 import { showCollectAccepted } from "@renderer/features/metrics/collect-feedback";
 import { METRIC_LABELS } from "@renderer/features/metrics/metric-presentation";
 import { useMetricResource } from "@renderer/features/metrics/use-metric-resource";
+import { WorkbenchWelcome } from "./WorkbenchWelcome";
+import { ObservationHealth } from "./ObservationHealth";
 
 const METRIC_STYLE = {
   followers: { icon: Users, color: "var(--brand-500)" }, following: { icon: UserPlus, color: "#14b8a6" },
@@ -71,9 +73,9 @@ export function OverviewPage() {
     <div className={layout.page}>
       <div className={layout.pageHead}>
         <div>
-          <span className={layout.eyebrow}>OVERVIEW</span>
+          <span className={layout.eyebrow}>A LITTLE SPACE FOR BIG IDEAS</span>
           <h1>总览</h1>
-          <p>查看各平台账号状态和已取得的 8 项基础指标。跨平台总数仅供概览，不代表统一统计口径。</p>
+          <p>今天也一起，把创作打理得井井有条。</p>
         </div>
         <div className={layout.pageActions}>
           <Button icon={RefreshCw} loading={collecting} onClick={collectAll} disabled={accounts.length === 0}>
@@ -84,10 +86,16 @@ export function OverviewPage() {
           </Button>
         </div>
       </div>
-
+      <WorkbenchWelcome />
       <CollectQueue />
       {error && <div role="alert" className={styles.notice}><span>总览读取失败。{data ? "已保留上次结果。" : "请重试读取本地数据。"}</span><Button size="sm" onClick={retry}>重试读取</Button></div>}
       {data && !data.accountCount && <div role="status" className={styles.notice}>还没有账号。添加并登录账号后，可通过「全部采集」读取数据。</div>}
+      <div className={styles.sectionHeading}><h2>数据一瞥</h2><span>本地已取得的快照 · 跨平台口径不同，仅供概览</span></div>
+      <div className={styles.kpiRow}>
+        <Kpi icon={UsersRound} label="已添加账号" value={data?.accountCount} sub={data ? `${data.onlineCount} 在线 · ${data.attentionCount} 需关注` : error ? "账号汇总读取失败" : "正在读取本地账号"} accent="var(--brand-500)" loading={loading && !data} />
+        {(["followers", "plays", "likes"] as const).map(metric => <Kpi key={metric} icon={METRIC_STYLE[metric].icon} label={`${METRIC_LABELS[metric]}总量`} value={t[metric]} accent={METRIC_STYLE[metric].color} loading={loading && !data} sub={data ? `有值账号 ${data.coverage ? data.coverage[metric] ?? 0 : "—"} / ${data.accountCount}` : undefined} />)}
+      </div>
+      <div className={styles.operationsGrid}>
       <section className={styles.priority} aria-label="需要处理的账号">
         <Card>
           <div className={styles.cardHead}>
@@ -98,10 +106,12 @@ export function OverviewPage() {
           </div>
           {!data && loading ? (
             <Skeleton height={120} />
-          ) : !data ? <p>暂无可用状态，请重试读取总览。</p> : data.attention.length === 0 ? (
+          ) : !data ? <p>暂无可用状态，请重试读取总览。</p> : !data.accountCount ? (
+            <div className={styles.emptyAttention}><UsersRound size={26} /><strong>从连接第一个账号开始</strong><span>登录后，状态与数据会在这里相遇。</span><Button size="sm" variant="soft" onClick={() => setAddAccountOpen(true)}>连接账号</Button></div>
+          ) : data.attention.length === 0 ? (
             <div className={styles.okState}>
               <CheckCircle2 size={18} />
-              所有账号状态正常
+              {data.onlineCount === data.accountCount ? "所有账号状态正常" : "当前没有待处理提醒，部分账号尚未确认在线"}
             </div>
           ) : (
             <div className={styles.attentionList}>
@@ -137,10 +147,12 @@ export function OverviewPage() {
           )}
         </Card>
       </section>
+      <ObservationHealth data={data} loading={loading} error={error} />
+      </div>
       <details className={styles.statsDetails}>
         <summary>全部数据与今日观测</summary>
       <h3 className={styles.rowTitle}>全部数据</h3>
-      <div className={cx(styles.kpiRow, styles.kpiRow5)}>
+      <div className={cx(styles.kpiRow, styles.expandedKpis)}>
         <Kpi
           icon={UsersRound}
           label="账号"
@@ -150,16 +162,16 @@ export function OverviewPage() {
           loading={loading && !data}
         />
         {METRIC_NAMES.map(metric => <Kpi key={metric} icon={METRIC_STYLE[metric].icon} label={`总${METRIC_LABELS[metric]}`}
-          value={t[metric]} delta={d[metric]} accent={METRIC_STYLE[metric].color} loading={loading && !data}
-          sub={data ? `${data.coverage?.[metric] ?? 0}/${data.accountCount} 个账号有值` : undefined} />)}
+          value={t[metric]} accent={METRIC_STYLE[metric].color} loading={loading && !data}
+          sub={data ? `${data.coverage ? data.coverage[metric] ?? 0 : "—"}/${data.accountCount} 个账号有值` : undefined} />)}
       </div>
 
       <h3 className={styles.rowTitle}>今日观测</h3>
-      <div className={cx(styles.kpiRow, styles.kpiRow5)}>
+      <div className={cx(styles.kpiRow, styles.expandedKpis)}>
         {METRIC_NAMES.map(metric => <Kpi key={metric} icon={METRIC_STYLE[metric].icon}
           label={metric === "followers" ? "今日涨粉" : `今日${METRIC_LABELS[metric]}变化`} value={d[metric]} signed
           accent={METRIC_STYLE[metric].color} loading={loading && !data}
-          sub={data ? `${data.dayCoverage?.[metric] ?? 0}/${data.accountCount} 个账号可比较 · 北京时间 0 点` : undefined} />)}
+          sub={data ? `${data.dayCoverage ? data.dayCoverage[metric] ?? 0 : "—"}/${data.accountCount} 个账号可比较 · 北京时间 0 点` : undefined} />)}
       </div>
 
       </details>
@@ -270,7 +282,7 @@ export function OverviewPage() {
               <div className={styles.platformStats}>
                 {METRIC_NAMES.map(metric => <Stat key={metric} label={METRIC_LABELS[metric]}
                   value={platform.totals[metric]} delta={platform.dayDelta[metric]}
-                  coverage={`${platform.coverage?.[metric] ?? 0}/${platform.accountCount} 个账号有值`} />)}
+                  coverage={`${platform.coverage ? platform.coverage[metric] ?? 0 : "—"}/${platform.accountCount} 个账号有值`} />)}
               </div>
               <div className={styles.platformAccounts}>
                 {platform.accounts.slice(0, 6).map((a) => (
@@ -299,7 +311,6 @@ function Kpi({
   icon: Icon,
   label,
   value,
-  delta,
   sub,
   accent,
   loading,
@@ -308,7 +319,6 @@ function Kpi({
   icon: typeof Users;
   label: string;
   value?: number | null;
-  delta?: number | null;
   sub?: string;
   accent: string;
   loading: boolean;
@@ -334,12 +344,7 @@ function Kpi({
         </div>
       )}
       <div className={styles.kpiFoot}>
-        {sub ??
-          (delta !== undefined ? (
-            <>
-              <Delta value={delta} /> 今日
-            </>
-          ) : null)}
+        {sub}
       </div>
     </Card>
   );

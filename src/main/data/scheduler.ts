@@ -564,6 +564,17 @@ export class CollectScheduler {
           let newlySeen = 0;
           for (const work of result.works) newlySeen += store.db.run("INSERT OR IGNORE INTO collection_seen(job_id,remote_id) VALUES(?,?)", [job.id, work.remoteId]).changes;
           next.worksSeen = progress.worksSeen + newlySeen;
+          // Overlapping pages can reach the raw page count without covering all
+          // declared works. Confirm the end only against the distinct saved IDs.
+          if (page?.hasMore === false && !recentDone && next.total != null && next.worksSeen < next.total) {
+            next.complete = false;
+            next.reason = "平台声明作品分页结束，但去重后作品数未达到声明总数，请在官方作品页复核";
+            next.page = progress.page;
+            next.cursor = progress.cursor;
+            next.fingerprints = progress.fingerprints;
+            incomplete = true;
+            further = false;
+          }
           store.collectJobs.checkpoint(job.id, next);
           check();
           return { metrics, works };

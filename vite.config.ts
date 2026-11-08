@@ -14,7 +14,17 @@ export default defineConfig({
       "@main": fileURLToPath(new URL("./src/main", import.meta.url)),
     },
   },
-  server: { host: "127.0.0.1", port: 5173, strictPort: true },
+  server: {
+    host: "127.0.0.1", port: 5173, strictPort: true,
+    // Build outputs and account/cache files are not source. Watching them can
+    // reload the editor while packaging or while Chromium writes profile data.
+    watch: {
+      ignored: [
+        "**/release/**", "**/dist/**", "**/dist-electron/**", "**/output/**",
+        "**/backups/**", "**/logs/**", "**/workbench-data/**", "**/.local-data/**", "**/.npm-cache/**",
+      ],
+    },
+  },
   build: {
     outDir: "dist",
     emptyOutDir: true,

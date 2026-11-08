@@ -99,7 +99,7 @@ describe("automatic network switching UI", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows domestic mode during background startup without claiming platforms are enabled", async () => {
+  it("shows checking during startup without claiming a confirmed route or enabled platforms", async () => {
     useNetwork.setState({ startupPending: true });
     render(
       <>
@@ -109,7 +109,7 @@ describe("automatic network switching UI", () => {
     );
     await waitFor(() => expect(transport.settings).toHaveBeenCalledOnce());
     const status = screen.getByRole("status", { name: "网络状态" });
-    expect(status).toHaveTextContent("国内模式");
+    expect(status).toHaveTextContent("检查中");
     expect(status).toHaveTextContent("后台检测网络状态，确认后自动启用平台");
     expect(status).not.toHaveTextContent("代理已关闭");
     expect(screen.getByLabelText("国内平台运行状态")).toHaveTextContent("等待切换");

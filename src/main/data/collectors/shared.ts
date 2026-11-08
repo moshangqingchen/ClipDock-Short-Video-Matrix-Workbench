@@ -106,9 +106,10 @@ export function recordWorksPage(ctx: CollectorContext, json: unknown, list: unkn
     return;
   }
   const knownTotal = total ?? ctx.progress?.total;
-  if (list.length === 0 && knownTotal != null && knownTotal > (ctx.progress?.worksSeen ?? 0)) {
-    ctx.pageResult = { ...ctx.pageResult, receivedCount: 0, nextPage: ctx.progress?.page ?? 1, nextCursor: ctx.progress?.cursor ?? "", hasMore: null,
-      total: knownTotal, reason: "平台返回空页，但已读取作品数未达到声明总数，请在官方作品页复核" };
+  const endsPage = list.length === 0 || hasMore === false || cursor.toLowerCase() === "no_more";
+  if (endsPage && knownTotal != null && knownTotal > (ctx.progress?.worksSeen ?? 0) + list.length) {
+    ctx.pageResult = { ...ctx.pageResult, receivedCount: list.length, nextPage: ctx.progress?.page ?? 1, nextCursor: ctx.progress?.cursor ?? "", hasMore: null,
+      total: knownTotal, reason: "平台声明作品分页结束，但已读取作品数未达到声明总数，请在官方作品页复核" };
     return;
   }
   if (list.length === 0 && hasMore !== true) hasMore = false;
@@ -340,34 +341,26 @@ export function firstDefined(value: unknown, paths: string[]): unknown {
   return undefined;
 }
 
-/** Parse "1.2万", "3,456", "12w", 789 into a number. */
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** Parse complete count values; percentages, ranges, sentinels and truncated text stay unknown. */
 export function toNumber(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "number") return isCount(value) ? value : null;
   if (typeof value !== "string") return null;
-  const text = value.replace(/[,\s]/g, "").trim();
-  if (!text) return null;
-  const match = /^(-?\d+(?:\.\d+)?)\s*(万|w|W|亿|k|K|m|M)?/.exec(text);
+  const text = value.trim();
+  if (!text || text.length > 128) return null;
+  const match = /^((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*(万|w|W|亿|k|K|m|M)?$/.exec(text);
   if (!match) return null;
-  let n = Number(match[1]);
-  switch (match[2]) {
-    case "万":
-    case "w":
-    case "W":
-      n *= 10_000;
-      break;
-    case "亿":
-      n *= 100_000_000;
-      break;
-    case "k":
-    case "K":
-      n *= 1_000;
-      break;
-    case "m":
-    case "M":
-      n *= 1_000_000;
-      break;
-  }
-  return Number.isFinite(n) ? Math.round(n) : null;
+  const factors: Record<string, bigint> = { 万: 10_000n, w: 10_000n, 亿: 100_000_000n, k: 1_000n, m: 1_000_000n };
+  const [whole, fraction = ""] = match[1].replace(/,/g, "").split(".");
+  // Decimal arithmetic avoids rounding 1.001万 to an imprecise count or accepting
+  // values just above MAX_SAFE_INTEGER after Number has already rounded them.
+  const numerator = BigInt(whole + fraction) * (factors[match[2]?.toLowerCase()] ?? 1n);
+  const divisor = 10n ** BigInt(fraction.length);
+  if (numerator % divisor !== 0n || numerator / divisor > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(numerator / divisor);
 }
 
 export function toIso(value: unknown): string | null {
@@ -540,7 +533,7 @@ export function profileToMetrics(
     ["favorites", profile.favorites],
   ];
   return entries
-    .filter(([, value]) => typeof value === "number" && Number.isFinite(value))
+    .filter(([, value]) => isCount(value))
     .map(([metric, value]) => ({
       accountId: account.id,
       platformId: account.platformId,
@@ -565,7 +558,7 @@ export function worksToMetrics(works: Work[], capturedAt: string): MetricSnapsho
     ];
     for (const [metric, value] of pairs) {
       if (work.observations && !work.observations[metric as WorkMetric]) continue;
-      if (!Number.isFinite(value)) continue;
+      if (!isCount(value)) continue;
       out.push({
         accountId: work.accountId,
         platformId: work.platformId,
@@ -589,7 +582,7 @@ export function makeWork(
 ): Work {
   return {
     observations: Object.fromEntries(WORK_METRICS.filter((metric) =>
-      typeof partial[metric] === "number" && Number.isFinite(partial[metric]),
+      isCount(partial[metric]),
     ).map((metric) => [metric, { capturedAt: fetchedAt, origin: "official" as const }])),
     id: `${account.id}:${remoteId}`,
     accountId: account.id,
@@ -600,11 +593,11 @@ export function makeWork(
     url: partial.url ?? null,
     publishedAt: partial.publishedAt ?? null,
     status: partial.status ?? null,
-    plays: partial.plays ?? 0,
-    likes: partial.likes ?? 0,
-    comments: partial.comments ?? 0,
-    shares: partial.shares ?? 0,
-    favorites: partial.favorites ?? 0,
+    plays: isCount(partial.plays) ? partial.plays : 0,
+    likes: isCount(partial.likes) ? partial.likes : 0,
+    comments: isCount(partial.comments) ? partial.comments : 0,
+    shares: isCount(partial.shares) ? partial.shares : 0,
+    favorites: isCount(partial.favorites) ? partial.favorites : 0,
     fetchedAt,
   };
 }

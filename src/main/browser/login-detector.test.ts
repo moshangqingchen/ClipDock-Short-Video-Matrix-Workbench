@@ -149,13 +149,32 @@ describe("homepage authentication", () => {
       now: 600000, probe, evidence: { kind: "online" as const, key: "creator-self", sequence: 1, observedAt: 600000, reason: "creator signed in" } };
     expect(await detectLoginState(input)).toMatchObject({ status: "unknown", unconfirmed: true });
     expect(await detectLoginState({ ...input, homepageConfirmation: { kind: "online", observedAt: 599999 } }))
-      .toMatchObject({ status: "online", unconfirmed: true });
+      .toMatchObject({ status: "online", unconfirmed: true, retainedHomepage: true });
     expect(await detectLoginState({ ...input, homepageConfirmation: { kind: "online", observedAt: 300000 } }))
       .toMatchObject({ status: "online", unconfirmed: true });
     expect(await detectLoginState({ ...input, homepageConfirmation: { kind: "offline", observedAt: 599999 } }))
       .toMatchObject({ status: "offline", unconfirmed: true });
     expect(cookies).not.toHaveBeenCalled();
     expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes an inapplicable homepage check from an inconclusive current homepage", async () => {
+    const confirmation = Object.freeze({ kind: "online" as const, observedAt: 1000 });
+    const input = { platformId: "xiaohongshu" as const, session: fakeSession([]), homepageConfirmation: confirmation, now: 600000 };
+    const consoleResult = await detectLoginState({ ...input, currentUrl: getPlatform("xiaohongshu").routes.home });
+    expect(consoleResult).toMatchObject({ status: "online", unconfirmed: true, retainedHomepage: true });
+    const homeResult = await detectLoginState({ ...input, currentUrl: getPlatform("xiaohongshu").routes.site,
+      homepage: { kind: "unconfirmed", source: "homepage", reason: "主页未能识别当前身份" } });
+    expect(homeResult).toMatchObject({ status: "online", unconfirmed: true });
+    expect(homeResult.retainedHomepage).toBeUndefined();
+    expect(confirmation.observedAt).toBe(1000);
+    for (const changed of [
+      { lastError: "ERR_CONNECTION_RESET" },
+      { homepageConfirmation: null },
+      { currentUrl: "https://www.xiaohongshu.com/web-login/captcha" },
+    ]) {
+      expect((await detectLoginState({ ...input, currentUrl: getPlatform("xiaohongshu").routes.home, ...changed })).retainedHomepage).toBeUndefined();
+    }
   });
 
   it.each(["online", "offline"] as const)(

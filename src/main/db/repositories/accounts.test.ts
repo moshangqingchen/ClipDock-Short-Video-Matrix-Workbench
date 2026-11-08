@@ -144,6 +144,42 @@ describe("AccountsRepository", () => {
     }
   });
 
+  it("retains the non-homepage context only for that attempt and preserves independent evidence times", () => {
+    const store = createStore(":memory:");
+    try {
+      const account = store.accounts.create({ platformId: "xiaohongshu" });
+      const homepageConfirmation = { kind: "online" as const, observedAt: Date.now() - 60000 };
+      const info: AccountCheckInfo = { state: "unconfirmed", reason: "当前为管理后台，主页结论保留", attemptedAt: new Date().toISOString(), retainedHomepage: true };
+      expect(store.accounts.updateCheckInfo(account.id, { ...info, homepageConfirmation })?.checkInfo)
+        .toMatchObject({ retainedHomepage: true, homepageConfirmation });
+      const creatorConfirmation = { kind: "online" as const, observedAt: Date.now() - 1000 };
+      expect(store.accounts.updateCreatorConfirmation(account.id, creatorConfirmation)?.checkInfo)
+        .toMatchObject({ retainedHomepage: true, homepageConfirmation, creatorConfirmation });
+      const failed = store.accounts.updateCheckInfo(account.id, { state: "network_error", reason: "主页请求失败", attemptedAt: info.attemptedAt })!;
+      expect(failed.checkInfo?.retainedHomepage).toBeUndefined();
+      expect(failed.checkInfo).toMatchObject({ homepageConfirmation, creatorConfirmation });
+      store.accounts.updateCheckInfo(account.id, info);
+      expect(store.accounts.updateCheckInfo(account.id, { ...info, homepageConfirmation: null })?.checkInfo?.retainedHomepage).toBeUndefined();
+    } finally { store.close(); }
+  });
+
+  it("ignores a retained-homepage marker without valid evidence or on a different check state", () => {
+    const store = createStore(":memory:");
+    try {
+      const account = store.accounts.create({ platformId: "xiaohongshu" });
+      const info: AccountCheckInfo = { state: "unconfirmed", reason: "检查", attemptedAt: new Date().toISOString(), retainedHomepage: true };
+      const homepageConfirmation = { kind: "online" as const, observedAt: Date.now() - 1000 };
+      expect(store.accounts.updateCheckInfo(account.id, info)?.checkInfo?.retainedHomepage).toBeUndefined();
+      for (const state of ["checking", "confirmed", "network_error", "paused"] as const) {
+        expect(store.accounts.updateCheckInfo(account.id, { ...info, state, homepageConfirmation })?.checkInfo?.retainedHomepage).toBeUndefined();
+      }
+      for (const marker of ["true", 1, false, null]) {
+        store.db.run("UPDATE accounts SET check_info_json = ? WHERE id = ?", [JSON.stringify({ ...info, homepageConfirmation, retainedHomepage: marker }), account.id]);
+        expect(store.accounts.get(account.id)?.checkInfo?.retainedHomepage).toBeUndefined();
+      }
+    } finally { store.close(); }
+  });
+
   it("replaces an explicit homepage verdict and clears it only when null or the environment is reset", () => {
     const store = createStore(":memory:");
     try {

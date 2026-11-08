@@ -46,6 +46,8 @@ export interface AccountCheckInfo {
   state: "checking" | "confirmed" | "unconfirmed" | "network_error" | "paused";
   reason: string;
   attemptedAt: string;
+  /** No homepage check was applicable to the current page; preserve its explicit prior verdict. */
+  retainedHomepage?: true;
   /** Last explicit observation of this account's public homepage; unrelated checks preserve it. */
   homepageConfirmation?: HomepageConfirmation | null;
   /** Independent creator-console verdict; never confers public-homepage login. */

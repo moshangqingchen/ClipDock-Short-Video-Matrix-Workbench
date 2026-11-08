@@ -1,6 +1,7 @@
 import type {
   Account,
   AccountDto,
+  HomepageConfirmation,
   LocalMediaUrl,
   MediaProjectionMode,
   OverviewDto,
@@ -30,6 +31,31 @@ export function isLocalMediaUrl(value: unknown): value is LocalMediaUrl {
   );
 }
 
+/** Preserve only the independently observed verdict/time, never raw identity payloads. */
+function projectConfirmation(value: unknown): HomepageConfirmation | null | undefined {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const { kind, observedAt } = value as Record<string, unknown>;
+  if ((kind !== "online" && kind !== "offline") || typeof observedAt !== "number" ||
+      !Number.isSafeInteger(observedAt) || observedAt < 0 || observedAt > Date.now()) return undefined;
+  return { kind, observedAt };
+}
+
+function projectCheckInfo(info: Account["checkInfo"]): Account["checkInfo"] {
+  if (!info) return info;
+  const homepageConfirmation = projectConfirmation(info.homepageConfirmation);
+  const creatorConfirmation = projectConfirmation(info.creatorConfirmation);
+  return {
+    state: info.state,
+    reason: info.reason,
+    attemptedAt: info.attemptedAt,
+    ...(homepageConfirmation !== undefined ? { homepageConfirmation } : {}),
+    ...(creatorConfirmation !== undefined ? { creatorConfirmation } : {}),
+    ...(info.state === "unconfirmed" && info.retainedHomepage === true && homepageConfirmation
+      ? { retainedHomepage: true as const } : {}),
+  };
+}
+
 /** Explicit DTO field selection keeps internal source URLs and incidental internal fields out of IPC. */
 export function createMediaProjection<Mode extends MediaProjectionMode>(
   options: MediaProjectionOptions<Mode>,
@@ -55,11 +81,7 @@ export function createMediaProjection<Mode extends MediaProjectionMode>(
       partition: account.partition,
       status: account.status,
       statusMessage: account.statusMessage,
-      checkInfo: account.checkInfo ? {
-        state: account.checkInfo.state,
-        reason: account.checkInfo.reason,
-        attemptedAt: account.checkInfo.attemptedAt,
-      } : account.checkInfo,
+      checkInfo: projectCheckInfo(account.checkInfo),
       lastOnlineAt: account.lastOnlineAt,
       lastCheckedAt: account.lastCheckedAt,
       sessionExpiresAt: account.sessionExpiresAt,

@@ -1,7 +1,9 @@
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installed-backup-copy.ps1')
+$policy = Get-InstalledBackupPolicy
 $installRoot = 'D:\SJdownloads\创作平台'
 $dataRoot = 'C:\Users\Administrator\AppData\Roaming\short-video-matrix-workbench'
-$backupBase = 'D:\SJdownloads\创作平台备份'
+$backupBase = Get-InstalledBackupBase
 $dataContext = & (Join-Path $PSScriptRoot 'installed-data-context.ps1') -CallerProcessId $PID -DataRoot $dataRoot
 $dataRoot = $dataContext.Source.PhysicalPath
 
@@ -14,48 +16,44 @@ function Assert-AppClosed {
 }
 
 Assert-AppClosed
+New-Item -ItemType Directory -Path $backupBase -Force | Out-Null
 $backupRoot = Join-Path $backupBase ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
-if (Test-Path -LiteralPath $backupRoot) { throw '拒绝覆盖已有备份目录。' }
-New-Item -ItemType Directory -Path $backupRoot | Out-Null
+$stagingRoot = $backupRoot + '.partial'
+if ((Test-Path -LiteralPath $backupRoot) -or (Test-Path -LiteralPath $stagingRoot)) { throw '拒绝覆盖已有备份目录。' }
+New-Item -ItemType Directory -Path $stagingRoot | Out-Null
 $records = [System.Collections.Generic.List[object]]::new()
-foreach ($entry in @(@{ Source = $dataRoot; Name = 'user-data' }, @{ Source = $installRoot; Name = 'program' })) {
-  $source = (Resolve-Path -LiteralPath $entry.Source).Path
-  $items = @(Get-ChildItem -LiteralPath $source -Recurse -Force)
-  if (@($items | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) {
-    throw '源目录包含链接，需要先核实目标；未覆盖安装。'
+$excluded = 0
+try {
+  foreach ($entry in @(@{ Source = $dataRoot; Name = 'user-data' }, @{ Source = $installRoot; Name = 'program' })) {
+    $copied = Copy-InstalledBackupSection -Source $entry.Source -Destination (Join-Path $stagingRoot $entry.Name) -Section $entry.Name
+    foreach ($record in $copied.Files) { $records.Add($record) }
+    $excluded += $copied.ExcludedCacheDirectories
+    Assert-AppClosed
+    Write-Output "$($entry.Name): verified $($copied.Files.Count) files"
   }
-  $files = @($items | Where-Object { -not $_.PSIsContainer })
-  $destination = Join-Path $backupRoot $entry.Name
-  Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force
   Assert-AppClosed
-  $copied = @(Get-ChildItem -LiteralPath $destination -Recurse -Force -File)
-  if ($files.Count -ne $copied.Count) { throw '备份文件数量不匹配。' }
-  $index = 0
-  foreach ($file in $files) {
-    # Keep relative-path handling compatible with both PowerShell runtimes.
-    $sourcePrefix = $source.TrimEnd('\') + '\'
-    if (-not $file.FullName.StartsWith($sourcePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw '源文件超出备份目录。' }
-    $relative = $file.FullName.Substring($sourcePrefix.Length)
-    $copy = Join-Path $destination $relative
-    if ($file.Length -ne (Get-Item -LiteralPath $copy).Length) { throw '备份文件大小不匹配。' }
-    $beforeHash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
-    $copyHash = (Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash
-    if ($beforeHash -ne $copyHash) { throw '备份内容校验失败，未覆盖安装。' }
-    $records.Add([pscustomobject]@{ Section = $entry.Name; Path = $relative; Bytes = $file.Length; SHA256 = $copyHash })
-    $index++
-    if ($index % 4000 -eq 0) { Write-Output "$($entry.Name): verified $index / $($files.Count) files" }
+  $report = [pscustomobject]@{
+    ManagedBy = $policy.managedBy
+    Kind = 'full'
+    CreatedAt = [DateTimeOffset]::Now.ToString('o')
+    BackupRoot = $backupRoot
+    FileCount = $records.Count
+    TotalBytes = ($records | Measure-Object -Property Bytes -Sum).Sum
+    ExcludedUserDataDirectories = $policy.excludedUserDataDirectories
+    ExcludedCacheDirectories = $excluded
+    Verified = $true
+    DataContext = $dataContext
+    Files = $records
   }
-  Write-Output "$($entry.Name): verified $($files.Count) files"
+  [IO.File]::WriteAllText((Join-Path $stagingRoot 'manifest.json'), ($report | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  [IO.Directory]::Move($stagingRoot, $backupRoot)
+} catch {
+  $failure = $_
+  try { Remove-IncompleteInstalledBackup -StagingRoot $stagingRoot -BackupBase $backupBase }
+  catch { Write-Warning "Incomplete backup cleanup failed: $_" }
+  throw $failure
 }
-Assert-AppClosed
-$report = [pscustomobject]@{
-  CreatedAt = [DateTimeOffset]::Now.ToString('o')
-  BackupRoot = $backupRoot
-  FileCount = $records.Count
-  TotalBytes = ($records | Measure-Object -Property Bytes -Sum).Sum
-  Verified = $true
-  DataContext = $dataContext
-  Files = $records
-}
-[IO.File]::WriteAllText((Join-Path $backupRoot 'manifest.json'), ($report | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
-$report | Select-Object CreatedAt, BackupRoot, FileCount, TotalBytes, Verified, DataContext | ConvertTo-Json -Depth 4 -Compress
+# Retention failure must not invalidate a successfully verified backup.
+try { $retention = Remove-ExpiredInstalledBackups -BackupRoot $backupRoot }
+catch { $retention = [pscustomobject]@{ Status = 'deferred'; Error = $_.Exception.Message }; Write-Warning "Backup retention deferred: $_" }
+$report | Select-Object CreatedAt, BackupRoot, FileCount, TotalBytes, ExcludedCacheDirectories, Verified, DataContext, @{ Name = 'Retention'; Expression = { $retention } } | ConvertTo-Json -Depth 6 -Compress

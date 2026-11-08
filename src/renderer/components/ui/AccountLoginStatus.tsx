@@ -24,7 +24,11 @@ export function AccountLoginStatus({ account, detailed = false, compact = false 
         : STATUS_LABEL[account.status];
   const creator = account.checkInfo?.creatorConfirmation;
   const separateCreator = Boolean(getPlatform(account.platformId).routes.site);
-  const checkLabel = info && info.state !== "confirmed" && !showCheckState ? labels[info.state] : null;
+  // A creator-page check can preserve the independent homepage result without rechecking it.
+  // Inconclusive checks on the homepage itself still need visible feedback.
+  const retainedHomepage = info?.state === "unconfirmed" && info.retainedHomepage === true &&
+    info.homepageConfirmation?.kind === account.status;
+  const checkLabel = info && info.state !== "confirmed" && !showCheckState && !retainedHomepage ? labels[info.state] : null;
   return <span className={styles.loginStatus} data-detailed={detailed || undefined}>
     {detailed && separateCreator ? <span>主页：</span> : null}
     <span
@@ -43,8 +47,8 @@ export function AccountLoginStatus({ account, detailed = false, compact = false 
     </span>
     {!compact && checkLabel && checkLabel !== label ? <span className={styles.loginCheck}>{checkLabel}</span> : null}
     {detailed ? <>
-      {separateCreator ? <span title={creator ? `最近确认：${new Date(creator.observedAt).toLocaleString()}` : "请打开管理页，由平台网页确认后台登录"}>
-        管理后台：{creator?.kind === "online" ? "已确认登录" : creator?.kind === "offline" ? "需要登录" : "待确认"}
+      {separateCreator ? <span title={creator ? `最近确认：${new Date(creator.observedAt).toLocaleString()}` : "尚未获得管理后台的独立登录结果，打开管理页后会自动检测；这不表示账号已掉线"}>
+        管理后台：{creator?.kind === "online" ? "已登录" : creator?.kind === "offline" ? "需要登录" : "尚未确认"}
         {creator ? <small>（{new Date(creator.observedAt).toLocaleString()}）</small> : null}
       </span> : null}
       <small>{separateCreator ? "主页" : "登录"}最近确认：{confirmed}</small>

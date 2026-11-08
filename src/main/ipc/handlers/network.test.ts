@@ -27,7 +27,11 @@ function fixture(
       return value;
     }),
   };
-  const observer = { invalidate: vi.fn(), refresh: vi.fn(async () => checkingNetworkSnapshot()) };
+  const observer = {
+    invalidate: vi.fn(),
+    snapshot: vi.fn(() => checkingNetworkSnapshot()),
+    refresh: vi.fn(async () => checkingNetworkSnapshot()),
+  };
   registerNetworkHandlers(
     ipc as unknown as IpcRegistrar,
     observer as unknown as NetworkObserver,
@@ -109,5 +113,20 @@ describe("network settings lifecycle boundary", () => {
     expect(settled).toBe(false);
     resolve();
     expect(await result).toMatchObject({ enforcement: "observe", state: "checking" });
+  });
+
+  it("returns an invalidation that arrives while selected-source inspection is pending", async () => {
+    let resolve!: () => void;
+    const f = fixture(undefined, () => new Promise<void>((done) => { resolve = done; }));
+    f.observer.refresh.mockResolvedValue({
+      ...checkingNetworkSnapshot(), instanceId: "main", sequence: 1, reason: "READY",
+    });
+    const result = f.refresh();
+    await Promise.resolve();
+    f.observer.snapshot.mockReturnValue({
+      ...checkingNetworkSnapshot(), instanceId: "main", sequence: 2, reason: "NETWORK_CHANGED",
+    });
+    resolve();
+    expect(await result).toMatchObject({ sequence: 2, reason: "NETWORK_CHANGED" });
   });
 });

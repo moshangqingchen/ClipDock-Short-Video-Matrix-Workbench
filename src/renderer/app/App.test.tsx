@@ -12,12 +12,13 @@ describe("App (browser preview mode)", () => {
   it("renders the shell with navigation, account tree and overview", async () => {
     render(<App />);
     expect(screen.getByRole("navigation", { name: "主导航" })).toBeInTheDocument();
-    expect(screen.getByRole("complementary", { name: "国内账号列表" })).toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "国内账号列表" })).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "总览" })).toBeInTheDocument());
-    // preview data populates the platform groups
-    await waitFor(() => expect(screen.getAllByText(/品牌官方号/).length).toBeGreaterThan(0));
+    expect(screen.getByText("界面预览 · 演示数据")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /短视频创作者平台/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /短视频创作者平台/ }));
+    expect(screen.getByRole("complementary", { name: "国内账号列表" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByText(/品牌官方号/).length).toBeGreaterThan(0));
     const hideDomesticViews = vi.spyOn(api.views, "hideAll");
     fireEvent.change(screen.getByRole("combobox", { name: "切换国内或国外平台" }), {
       target: { value: "global" },

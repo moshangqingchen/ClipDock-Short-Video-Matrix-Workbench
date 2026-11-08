@@ -2,19 +2,41 @@
  * Launch the packaged main process against a throwaway data dir, wait for the
  * shell to load and the IPC bridge to answer, then exit non-zero on failure.
  * Run via: npm run smoke:electron
+ * UI-only verification after a build: node scripts/electron-window-smoke.mjs --visual-refresh
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import electronPath from "electron";
 import { createServer } from "node:net";
+import assert from "node:assert/strict";
 
-const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "sv-smoke-"));
+const projectRoot = fs.realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."));
+process.chdir(projectRoot);
+function isWithinProject(directory) {
+  const relative = path.relative(projectRoot, directory);
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+function projectDirectory(...parts) {
+  let current = projectRoot;
+  for (const part of parts) {
+    current = path.resolve(current, part);
+    if (!isWithinProject(current)) throw new Error("unsafe smoke output directory");
+    if (!fs.existsSync(current)) fs.mkdirSync(current);
+    // Refuse redirected output trees before creating files beneath them.
+    if (fs.lstatSync(current).isSymbolicLink() || !isWithinProject(fs.realpathSync(current)))
+      throw new Error("smoke output directory must remain inside the project");
+  }
+  return current;
+}
+const tempRoot = projectDirectory("output", "temp");
+const dataDir = fs.mkdtempSync(path.join(tempRoot, "sv-smoke-"));
+const visualRefresh = process.argv.includes("--visual-refresh");
 const unavailableMediaCache = process.argv.includes("--unavailable-media-cache");
 const packaged = process.argv.includes("--packaged");
 const packageDirectory = process.argv.find(arg => arg.startsWith('--packaged-dir='))?.slice('--packaged-dir='.length) ?? 'release/win-unpacked';
-const launchPath = packaged ? path.resolve(packageDirectory, "短视频矩阵工作台.exe") : electronPath;
+const launchPath = packaged ? path.resolve(projectRoot, packageDirectory, "短视频矩阵工作台.exe") : electronPath;
 if (packaged && !fs.existsSync(launchPath))
   throw new Error("packaged executable missing; run npm run pack first");
 if (unavailableMediaCache)
@@ -39,12 +61,15 @@ const child = spawn(
   launchPath,
   [...(packaged ? [] : ["."]), ...screenshotArgs, `--remote-debugging-port=${port}`],
   {
-    cwd: process.cwd(),
+    cwd: projectRoot,
     env: {
       ...process.env,
       SV_WORKBENCH_DATA_DIR: dataDir,
       SV_WORKBENCH_SMOKE: "1",
       ELECTRON_ENABLE_LOGGING: "0",
+      TMP: dataDir,
+      TEMP: dataDir,
+      TMPDIR: dataDir,
     },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
@@ -129,59 +154,81 @@ async function evaluate(expression) {
   return result.result.value;
 }
 
-async function captureEditorScreenshot() {
-  const before = await evaluate(`({
-    visibility: document.visibilityState,
-    focused: document.hasFocus(),
-    width: innerWidth,
-    height: innerHeight,
-    runningAnimations: document.getAnimations().filter(animation => animation.playState === 'running').length
-  })`);
-  // Focus/RAF readiness is useful diagnosis but did not fix the observed legacy
-  // screenshot timeout on its own. The launch switch above changes the native
-  // capture path; these checks leave product DOM/CSS and the native window hidden.
+async function captureWindowScreenshot(label = "editor") {
+  const snapshot = () => evaluate(`(() => {
+    const main = document.querySelector('main')?.getBoundingClientRect();
+    const localImages = [...document.images].filter(image => {
+      const rect = image.getBoundingClientRect();
+      const source = new URL(image.currentSrc || image.src, location.href);
+      return (source.protocol === 'file:' || source.pathname.includes('/assets/')) &&
+        rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0 &&
+        rect.left < innerWidth && rect.top < innerHeight;
+    });
+    return {
+      visibility: document.visibilityState, focused: document.hasFocus(),
+      width: innerWidth, height: innerHeight, pixelRatio: devicePixelRatio,
+      ready: document.readyState === 'complete' && document.fonts.status === 'loaded' && !!main && main.width > 0 && main.height > 0,
+      runningAnimations: document.getAnimations().filter(animation => animation.playState === 'running').length,
+      missingImages: localImages.filter(image => !image.complete || image.naturalWidth === 0).length,
+      overflow: document.documentElement.scrollWidth > innerWidth + 1,
+      nestedButtons: document.querySelectorAll('button button').length,
+      layout: JSON.stringify({ width: innerWidth, height: innerHeight,
+        main: main ? [main.x, main.y, main.width, main.height].map(Math.round) : null,
+        heading: document.querySelector('h1')?.textContent,
+        dialog: document.querySelector('[role="dialog"]')?.getAttribute('aria-labelledby') }),
+    };
+  })()`);
+  // Hidden Windows windows can deliver only one RAF even with focus emulation.
+  // RAF is diagnostic: a successful new-surface capture plus stable, ready DOM,
+  // loaded local images and matching PNG dimensions is the presentation evidence.
+  // These checks leave product DOM/CSS and the native window hidden.
   // CDP focus emulation activates only this throwaway page, not the OS window.
   // https://chromedevtools.github.io/devtools-protocol/tot/Emulation/#method-setFocusEmulationEnabled
   await command("Emulation.setFocusEmulationEnabled", { enabled: true });
-  const frames = await evaluate(`new Promise(resolve => {
-    let frames = 0;
-    let frameId;
-    const timer = setTimeout(() => { cancelAnimationFrame(frameId); resolve(frames); }, 2000);
-    const next = () => {
-      frames += 1;
-      if (frames === 2) { clearTimeout(timer); resolve(frames); }
-      else frameId = requestAnimationFrame(next);
-    };
-    frameId = requestAnimationFrame(next);
-  })`);
-  console.log(
-    `editor compositor readiness: ${JSON.stringify({ ...before, observedAnimationFrames: frames })}`,
-  );
-  if (frames !== 2) throw new Error("hidden editor did not produce two animation frames");
-  await sleep(200);
-  const started = performance.now();
-  const shot = await command("Page.captureScreenshot", {
-    format: "png",
-    fromSurface: true,
-    captureBeyondViewport: false,
-    optimizeForSpeed: true,
-  });
-  const png = Buffer.from(shot.data, "base64");
-  if (
-    png.length < 24 ||
-    !png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
-    png.readUInt32BE(16) === 0 ||
-    png.readUInt32BE(20) === 0
-  )
-    throw new Error("editor capture did not produce a nonempty PNG");
-  console.log(
-    `editor screenshot captured: ${JSON.stringify({
-      width: png.readUInt32BE(16),
-      height: png.readUInt32BE(20),
-      elapsedMs: Math.round(performance.now() - started),
-    })}`,
-  );
-  return png;
+  let failure;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const frames = await evaluate(`new Promise(resolve => {
+      let frames = 0;
+      let frameId;
+      const timer = setTimeout(() => { cancelAnimationFrame(frameId); resolve(frames); }, 2000);
+      const next = () => {
+        frames += 1;
+        if (frames === 2) { clearTimeout(timer); resolve(frames); }
+        else frameId = requestAnimationFrame(next);
+      };
+      frameId = requestAnimationFrame(next);
+    })`);
+    await sleep(200);
+    const before = await snapshot();
+    console.log(`${label} compositor readiness: ${JSON.stringify({ ...before, attempt, observedAnimationFrames: frames })}`);
+    try {
+      const started = performance.now();
+      const shot = await command("Page.captureScreenshot", {
+        format: "png", fromSurface: true, captureBeyondViewport: false, optimizeForSpeed: true,
+      });
+      const png = Buffer.from(shot.data, "base64");
+      if (png.length < 24 || !png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
+        throw new Error("capture did not produce a PNG");
+      const width = png.readUInt32BE(16), height = png.readUInt32BE(20);
+      // Chromium captures physical pixels unless device emulation sets scale 1.
+      if (width !== Math.round(before.width * before.pixelRatio) || height !== Math.round(before.height * before.pixelRatio))
+        throw new Error(`PNG dimensions do not match viewport: ${width}x${height}`);
+      const after = await snapshot();
+      if (!before.ready || !after.ready || before.layout !== after.layout || before.pixelRatio !== after.pixelRatio)
+        throw new Error("page layout or fonts were not stable across capture");
+      if (before.missingImages || after.missingImages) throw new Error("visible local illustrations have not loaded");
+      if (before.overflow || after.overflow || before.nestedButtons || after.nestedButtons)
+        throw new Error("captured page has horizontal overflow or nested buttons");
+      console.log(`${label} screenshot captured: ${JSON.stringify({ width, height, attempt,
+        observedAnimationFrames: frames, elapsedMs: Math.round(performance.now() - started) })}`);
+      return png;
+    } catch (error) {
+      failure = error;
+      console.warn(`${label} capture attempt ${attempt}/3 failed: ${error.message}`);
+      if (attempt < 3) await sleep(300);
+    }
+  }
+  throw new Error(`${label} capture failed after 3 attempts: ${failure?.message ?? "unknown capture failure"}`);
 }
 
 async function enableGlobalApiTools() {
@@ -737,7 +784,7 @@ async function verifyGlobalAppConfiguration(encryptionAvailable) {
       client?.value === 'synthetic-smoke.apps.googleusercontent.com');
   })()`);
   if (!formReady) throw new Error("global application editor did not preserve write-only password boundary");
-  const editorShot = await captureEditorScreenshot();
+  const editorShot = await captureWindowScreenshot();
   fs.writeFileSync(path.resolve("shot-global-app-editor.png"), editorShot);
   return result.secretChecked;
 }
@@ -751,6 +798,13 @@ async function verifyUnifiedWorkspace(ids) {
   };
   for (const name of ["总览", "数据观测", "素材库", "发布助手", "设置"]) {
     await clickModule(name);
+    if (!["数据观测", "发布助手"].includes(name)) {
+      const valid = await evaluate(
+        `(() => {const nav=document.querySelector('nav[aria-label="主导航"] button[aria-label="${name}"]');return nav?.className.includes('active') && !document.querySelector('aside[aria-label="国外账号列表"],aside[aria-label="国内账号列表"]') && !document.querySelector('section[aria-label$="官网工作区"]');})()`,
+      );
+      if (!valid) throw new Error("account-independent module did not release its sidebar: " + name);
+      continue;
+    }
     await evaluate(
       `[...document.querySelectorAll('aside[aria-label="国外账号列表"] button[aria-pressed]')].find(e=>e.textContent.includes('Smoke x')).dispatchEvent(new MouseEvent('click',{bubbles:true}))`,
     );
@@ -897,8 +951,37 @@ async function verifyDomesticOptimization() {
   try {
     await command('Network.enable', {}, sessionId);
     await command('Network.emulateNetworkConditions', {offline:true,latency:0,downloadThroughput:-1,uploadThroughput:-1}, sessionId);
-    await evaluate(`(async()=>{const a=(await window.workbench.accounts.list()).find(a=>a.platformId==='weixin_channels');await window.workbench.views.reload(a.id).catch(()=>{});})()`);
-    await sleep(300);
+    const reload = await evaluate(`(async()=>{
+      const account=(await window.workbench.accounts.list()).find(a=>a.platformId==='weixin_channels'&&a.displayName.startsWith('层级测试'));
+      if(!account)throw new Error('throwaway Channels account missing');
+      const before=await window.workbench.views.state(account.id);
+      if(!before)throw new Error('throwaway Channels view missing');
+      await window.workbench.views.reload(account.id);
+      return {id:account.id,instanceId:before.instanceId,navigationId:before.navigationId};
+    })()`);
+    // reload() only starts Chromium's asynchronous navigation. Its main-frame
+    // did-fail-load event, IPC projection and React layout can arrive well after
+    // 300 ms. Wait for this reload's actual offline error and rendered controls
+    // before measuring; missing controls are a readiness failure, not overlap.
+    try {
+      await waitForUi(`(async()=>{
+        const state=await window.workbench.views.state(${JSON.stringify(reload.id)});
+        const retry=[...document.querySelectorAll('button')].find(b=>b.textContent==='重新加载');
+        return state?.instanceId===${JSON.stringify(reload.instanceId)}&&
+          state.navigationId!==${JSON.stringify(reload.navigationId)}&&
+          !state.loading&&/ERR_INTERNET_DISCONNECTED/.test(state.lastError||'')&&
+          !!retry&&!!document.querySelector('[data-view-host]');
+      })()`, 'offline reload error and retry controls');
+    } catch (error) {
+      const readiness = await evaluate(`(async()=>{
+        const state=await window.workbench.views.state(${JSON.stringify(reload.id)});
+        return {viewExists:!!state,loading:state?.loading,lastError:state?.lastError,
+          instanceId:state?.instanceId,navigationId:state?.navigationId,
+          retry:[...document.querySelectorAll('button')].some(b=>b.textContent==='重新加载'),
+          host:!!document.querySelector('[data-view-host]')};
+      })()`);
+      throw new Error('offline reload UI did not become ready: '+JSON.stringify(readiness), {cause:error});
+    }
   const errorLayout = await evaluate(`(() => {
     const retry=[...document.querySelectorAll('button')].find(b=>b.textContent==='重新加载');
     const host=document.querySelector('[data-view-host]');
@@ -1027,6 +1110,187 @@ async function verifyCollectionQuality() {
   console.log('collection quality smoke: eight basic metrics; six analytics adapters; validated IPC; resumable history; 960/1440 px basic and advanced detail');
 }
 
+async function verifyLoginEvidenceProjection() {
+  // The database writer is only for this run's newly created throwaway profile.
+  // Recheck the actual packaged app's path before any fixture creation or cleanup.
+  const assertIsolatedProfile = async () => {
+    const info = await evaluate("window.workbench.app.info()");
+    const resolved = path.resolve(dataDir);
+    if (path.resolve(info.userDataPath) !== resolved || path.dirname(resolved) !== tempRoot ||
+        !isWithinProject(resolved) || !/^sv-smoke-[A-Za-z0-9]+$/.test(path.basename(resolved)) ||
+        fs.lstatSync(resolved).isSymbolicLink() || fs.realpathSync(resolved) !== resolved)
+      throw new Error("refusing login evidence fixture outside the isolated smoke profile");
+    const databasePath = path.join(resolved, "workbench.db");
+    if (!fs.lstatSync(databasePath).isFile() || fs.lstatSync(databasePath).isSymbolicLink() ||
+        fs.realpathSync(databasePath) !== databasePath)
+      throw new Error("refusing redirected smoke database");
+    return databasePath;
+  };
+  const databasePath = await assertIsolatedProfile();
+  const originalIds = await evaluate("window.workbench.accounts.list().then(rows => rows.map(row => row.id).sort())");
+  const fixtureName = `Smoke login evidence projection ${Date.now()}`;
+  const created = await evaluate(`window.workbench.accounts.create(${JSON.stringify({
+    platformId: "xiaohongshu", displayName: fixtureName,
+  })})`);
+  assert.ok(created?.id && !originalIds.includes(created.id) &&
+    created.platformId === "xiaohongshu" && created.displayName === fixtureName,
+  "login evidence fixture must be a new synthetic account");
+  let database;
+  try {
+    assert.equal(await evaluate(`window.workbench.views.state(${JSON.stringify(created.id)})`), null,
+      "login evidence fixture must not load any platform page");
+    const { DatabaseSync } = await import("node:sqlite");
+    database = new DatabaseSync(databasePath);
+    database.exec("PRAGMA busy_timeout = 5000");
+    const update = database.prepare(`UPDATE accounts SET status = 'online', check_info_json = ?,
+      last_checked_at = ?, last_online_at = ? WHERE id = ? AND platform_id = 'xiaohongshu' AND display_name = ?`);
+    const homepageAt = Date.now() - 60_000;
+    const creatorAt = homepageAt + 2000;
+    const homepageIso = new Date(homepageAt).toISOString();
+    const attemptedAt = new Date(creatorAt + 1000).toISOString();
+    const privateMetadata = "synthetic-internal-login-observation-must-not-cross-ipc";
+    const homepageConfirmation = { kind: "online", observedAt: homepageAt };
+    const base = { state: "unconfirmed", reason: "保留上次主页登录结论", attemptedAt,
+      retainedHomepage: true, homepageConfirmation };
+    for (const creatorConfirmation of [
+      { kind: "online", observedAt: creatorAt },
+      { kind: "offline", observedAt: creatorAt + 1000 },
+      null,
+    ]) {
+      const changes = update.run(JSON.stringify({
+        ...base,
+        homepageConfirmation: { ...homepageConfirmation, rawResponse: privateMetadata },
+        creatorConfirmation: creatorConfirmation && { ...creatorConfirmation, subject: privateMetadata, endpoint: privateMetadata },
+        token: privateMetadata,
+      }), homepageIso, homepageIso, created.id, fixtureName).changes;
+      assert.equal(Number(changes), 1, "login evidence writer must update only its synthetic fixture");
+      // Use the built preload/main IPC route, not source imports or renderer mocks.
+      const projected = await evaluate(`window.workbench.accounts.list().then(rows => rows.find(row => row.id === ${JSON.stringify(created.id)}))`);
+      assert.ok(projected, "login evidence fixture missing from packaged accounts.list");
+      assert.equal(projected.status, "online", "creator evidence must not replace the homepage status");
+      assert.equal(projected.lastCheckedAt, homepageIso, "IPC must preserve the original homepage confirmation time");
+      assert.equal(projected.lastOnlineAt, homepageIso, "IPC must not renew the homepage login time");
+      assert.deepEqual(projected.checkInfo, { ...base, creatorConfirmation },
+        "packaged IPC must preserve independent login evidence, explicit revocation and retained-homepage feedback");
+      assert.ok(!JSON.stringify(projected).includes(privateMetadata), "internal observation fields leaked through accounts.list");
+    }
+  } finally {
+    try { database?.close(); }
+    finally {
+      await assertIsolatedProfile();
+      await evaluate(`window.workbench.accounts.delete(${JSON.stringify(created.id)})`);
+      const remainingIds = await evaluate("window.workbench.accounts.list().then(rows => rows.map(row => row.id).sort())");
+      assert.deepEqual(remainingIds, originalIds, "login evidence fixture cleanup changed other smoke accounts");
+    }
+  }
+  console.log("login evidence IPC smoke: independent homepage/creator verdicts, original times, retained-homepage feedback, revocation and metadata filtering; synthetic fixture deleted");
+}
+
+async function waitForUi(expression, label, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await evaluate(expression)) return;
+    await sleep(100);
+  }
+  throw new Error("UI did not become ready: " + label);
+}
+
+async function verifyVisualRefresh() {
+  const directory = projectDirectory("output", "ui-refresh");
+  const screenshots = [];
+  fs.writeFileSync(path.join(directory, "verification.json"), JSON.stringify({ status: "running", mode: "visual-refresh" }, null, 2));
+  const screenshot = async (name) => {
+    const filename = `${name}.png`;
+    fs.writeFileSync(path.join(directory, filename), await captureWindowScreenshot(name));
+    screenshots.push(filename);
+  };
+  const selectModule = async (name, sidebar) => {
+    await evaluate(`document.querySelector('nav[aria-label="主导航"] button[aria-label=${JSON.stringify(name)}]').click()`);
+    await waitForUi(`(() => {
+      const nav = document.querySelector('nav[aria-label="主导航"] button[aria-label=${JSON.stringify(name)}]');
+      return nav?.className.includes('active') && ${sidebar ? "!!" : "!"}document.querySelector('aside[aria-label="国内账号列表"]');
+    })()`, `${name} sidebar visibility`);
+  };
+  const setTheme = async (theme) => {
+    if (await evaluate("document.documentElement.dataset.theme") !== theme) {
+      await evaluate(`document.querySelector('button[aria-label="切换明暗主题"]').click()`);
+    }
+    await waitForUi(`document.documentElement.dataset.theme === ${JSON.stringify(theme)}`, `${theme} theme`);
+  };
+  await selectModule("总览", false);
+  await waitForUi(`(() => {
+    const image = document.querySelector('section[aria-label="创作工作台"] img');
+    return image?.complete && image.naturalWidth > 0 && document.body.innerText.includes('还没有账号');
+  })()`, "illustrated empty-account overview");
+  const overview = await evaluate("window.workbench.metrics.overview(30)");
+  if (overview.accountCount !== 0 || Object.keys(overview.totals).length || overview.trend.length)
+    throw new Error("visual fixture must contain no accounts or fabricated metrics");
+  if (await evaluate("document.body.innerText.includes('所有账号状态正常')"))
+    throw new Error("empty account overview falsely reports all accounts healthy");
+  await setTheme("light");
+  for (const [width, height] of [[1440, 1000], [1024, 800], [960, 740]]) {
+    await command("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+    await sleep(250);
+    const geometry = await evaluate(`(() => {
+      const main = document.querySelector('main')?.getBoundingClientRect();
+      const hero = document.querySelector('section[aria-label="创作工作台"]')?.getBoundingClientRect();
+      return {
+        overflow: document.documentElement.scrollWidth > innerWidth + 1,
+        nestedButtons: document.querySelectorAll('button button').length,
+        contained: !!main && !!hero && main.left >= 0 && main.right <= innerWidth + 1 &&
+          hero.left >= main.left && hero.right <= main.right + 1 && hero.width >= 300,
+        imagesLoaded: [...document.querySelectorAll('section[aria-label="创作工作台"] img, section[aria-label="快捷工作区"] img')]
+          .every(image => image.complete && image.naturalWidth > 0),
+      };
+    })()`);
+    if (geometry.overflow || geometry.nestedButtons || !geometry.contained || !geometry.imagesLoaded)
+      throw new Error("overview layout failed: " + JSON.stringify({ width, height, ...geometry }));
+    await screenshot(`overview-light-${width}`);
+  }
+  await command("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+  await setTheme("dark");
+  await waitForUi(`window.workbench.settings.get().then(settings => settings.theme === 'dark')`, "persisted dark theme");
+  await screenshot("overview-dark-1440");
+  await setTheme("light");
+  await waitForUi(`window.workbench.settings.get().then(settings => settings.theme === 'light')`, "persisted light theme");
+  await evaluate(`document.querySelector('button[aria-label="搜索账号与功能"]').click()`);
+  await waitForUi(`document.activeElement?.matches('input[role="combobox"]')`, "search input focus");
+  await evaluate(`(() => {
+    const input = document.querySelector('input[role="combobox"]');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '素材库');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await waitForUi(`(() => {
+    const results = document.querySelectorAll('[role="listbox"] [role="option"]');
+    return results.length === 1 && results[0].textContent.includes('素材库');
+  })()`, "filtered page search");
+  await screenshot("search-assets");
+  await evaluate(`document.querySelector('input[role="combobox"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
+  await waitForUi(`document.querySelector('h1')?.textContent === '素材库' && !document.querySelector('[role="dialog"]')`, "search keyboard navigation");
+  await screenshot("assets-light-1440");
+  await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }))`);
+  await waitForUi(`!!document.querySelector('input[role="combobox"]')`, "Ctrl K opens search");
+  await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  await waitForUi(`!document.querySelector('[role="dialog"]')`, "Escape closes search");
+  for (const [name, sidebar] of [["短视频创作者平台", true], ["数据观测", true], ["发布助手", true], ["素材库", false], ["设置", false], ["总览", false]]) {
+    await selectModule(name, sidebar);
+    if (name === "数据观测") await screenshot("metrics-light-1440");
+    if (name === "发布助手") await screenshot("publish-light-1440");
+  }
+  const accounts = await evaluate("window.workbench.accounts.list()");
+  const globalAccounts = await evaluate("window.workbench.globalAccounts.list()");
+  if (accounts.length || globalAccounts.length) throw new Error("visual-only smoke unexpectedly created an account");
+  await command("Emulation.clearDeviceMetricsOverride");
+  fs.writeFileSync(path.join(directory, "verification.json"), JSON.stringify({
+    status: "passed", mode: "visual-refresh", completedAt: new Date().toISOString(),
+    checks: ["isolated empty database", "no fabricated totals", "loaded illustrations", "960/1024/1440 overview layout",
+      "persisted light/dark themes", "search focus/filter/Enter", "Ctrl K and Escape", "route-specific account sidebars"],
+    screenshots,
+    limitation: "Local UI and IPC verification only; no platform login, metrics collection or publishing was performed.",
+  }, null, 2));
+  console.log(`visual refresh smoke passed; screenshots and report: ${directory}`);
+}
+
 let ok = false;
 let globalBoundaryStarted = false;
 try {
@@ -1046,6 +1310,13 @@ try {
       if (!Array.isArray(accounts)) throw new Error("accounts.list did not return an array");
       const rendered = await evaluate("Boolean(document.querySelector('nav[aria-label=主导航]'))");
       if (!rendered) throw new Error("shell navigation not rendered");
+      if (visualRefresh) {
+        // Once UI actions begin, failures must not be disguised as startup retries.
+        globalBoundaryStarted = true;
+        await verifyVisualRefresh();
+        ok = true;
+        break;
+      }
       const network = await evaluate("window.workbench.network.snapshot()");
       if (
         network.enforcement !== "strict" ||
@@ -1099,6 +1370,7 @@ try {
       await verifyDomesticOptimization();
       await verifyMessagesWorkspace();
       await verifyCollectionQuality();
+      await verifyLoginEvidenceProjection();
       if (process.argv.includes("--require-domestic-direct")) {
         const deadline = Date.now() + 60000;
         let direct;
@@ -1163,6 +1435,8 @@ try {
   }
 } catch (error) {
   console.error("smoke failed:", error.message);
+  if (visualRefresh) fs.writeFileSync(path.join(projectDirectory("output", "ui-refresh"), "verification.json"),
+    JSON.stringify({ status: "failed", mode: "visual-refresh", error: error.message }, null, 2));
   if (stderr.trim()) console.error(stderr.slice(-2000));
 } finally {
   // Let Electron drain its registered sessions and native readers before removing
@@ -1183,8 +1457,10 @@ try {
   }
   const resolvedDataDir = path.resolve(dataDir);
   if (
-    path.dirname(resolvedDataDir) !== path.resolve(os.tmpdir()) ||
-    !path.basename(resolvedDataDir).startsWith("sv-smoke-")
+    path.dirname(resolvedDataDir) !== tempRoot ||
+    !isWithinProject(resolvedDataDir) ||
+    !/^sv-smoke-[A-Za-z0-9]+$/.test(path.basename(resolvedDataDir)) ||
+    (fs.existsSync(resolvedDataDir) && (fs.lstatSync(resolvedDataDir).isSymbolicLink() || fs.realpathSync(resolvedDataDir) !== resolvedDataDir))
   )
     throw new Error("unsafe smoke cleanup target");
   fs.rmSync(resolvedDataDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });

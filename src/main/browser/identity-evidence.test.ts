@@ -45,6 +45,48 @@ describe("current profile observation on additional platforms", () => {
   });
 });
 
+describe("Douyin consumer homepage self-profile observation", () => {
+  const url = "https://www.douyin.com/aweme/v1/web/user/profile/self/";
+  const user = { uid: "123456", sec_uid: "self-subject", nickname: "新昵称", unique_id: "own-handle",
+    avatar_thumb: { url_list: ["https://p3.douyinpic.com/new.jpg"] },
+    follower_count: 0, following_count: 2, total_favorited: 3 };
+
+  it("reads the official self response envelope and native account fields", () => {
+    for (const status_code of [0, "0"]) {
+      const verdict = parseIdentityResponse("douyin", url + "?aid=6383&source=channel_pc_web&personal_center_strategy=1",
+        200, JSON.stringify({ status_code, user, token: "never-export", author: { nickname: "别人" } }));
+      expect(verdict).toMatchObject({ kind: "online", subject: "self-subject", profile: {
+        externalId: "self-subject", displayName: "新昵称", handle: "own-handle",
+        avatarUrl: "https://p3.douyinpic.com/new.jpg", followers: 0, following: 2, likes: 3,
+      } });
+      expect(JSON.stringify(verdict)).not.toMatch(/never-export|别人/);
+    }
+  });
+
+  it("never observes public authors, target-user query parameters or lookalike destinations", () => {
+    for (const badUrl of [
+      url.replace("/self/", "/other/"), url.replace("www.douyin.com", "creator.douyin.com"),
+      url.replace("www.douyin.com", "www.douyin.com.evil.example"), url.replace("https:", "http:"),
+      url.replace("https://", "https://user:password@"), url.replace(".com/", ".com:8443/"),
+      ...["sec_user_id", "secUserId", "sec_uid", "secUid", "uid", "user_id", "target_id", "target_user_id", "author_id"]
+        .map(key => url + `?${key}=another`),
+    ]) {
+      expect(isIdentityEndpoint("douyin", badUrl)).toBe(false);
+      expect(parseIdentityResponse("douyin", badUrl, 200, JSON.stringify({ status_code: 0, user })).profile).toBeUndefined();
+    }
+  });
+
+  it("requires success and the positive uid in the root current-user container", () => {
+    for (const body of [
+      { status_code: 8, user }, { user }, { status_code: 0, data: { user } },
+      { status_code: 0, user_info: user },
+      ...[undefined, null, "", "0", 0, -1, "guest"].map(uid => ({ status_code: 0, user: { ...user, uid } })),
+    ]) expect(parseIdentityResponse("douyin", url, 200, JSON.stringify(body)).profile).toBeUndefined();
+    for (const status of [401, 403, 429, 500])
+      expect(parseIdentityResponse("douyin", url, status, JSON.stringify({ status_code: 0, user })).profile).toBeUndefined();
+  });
+});
+
 // Synthetic, identity-only fixtures: no cookies, signatures or full production payloads.
 const samples = [
   {

@@ -1,0 +1,11 @@
+.banner { position: relative; isolation: isolate; min-height: 122px; display: flex; align-items: center; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; margin-bottom: 22px; background: #e9f0ff; }
+.banner > img { position: absolute; inset: 0 0 0 auto; height: 100%; width: 65%; object-fit: cover; object-position: 85% 56%; z-index: -2; }
+.banner::before { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, #edf3ff 35%, rgba(237,243,255,.82) 58%, rgba(237,243,255,.12)); z-index: -1; }
+.banner > div { padding: 20px 26px; max-width: 82%; }
+.banner span { display: flex; align-items: center; gap: 6px; font-size: 9px; letter-spacing: .15em; color: #687fb2; }
+.banner h2 { font-size: 19px; margin: 8px 0 6px; color: #374e79; }
+.banner p { color: #637ba0; font-size: 12px; line-height: 1.7; }
+:root[data-theme="dark"] .banner { background: #1e2c49; }
+:root[data-theme="dark"] .banner::before { background: linear-gradient(90deg, #1e2c49 35%, rgba(30,44,73,.82) 58%, rgba(30,44,73,.24)); }
+:root[data-theme="dark"] .banner h2 { color: #e2eaff; }
+:root[data-theme="dark"] .banner p, :root[data-theme="dark"] .banner span { color: #b2c0dd; }
